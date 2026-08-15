@@ -31,6 +31,7 @@ import { SearchPanel } from './components/SearchPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TagFilter } from './components/TagFilter'
 import { TrashPanel } from './components/TrashPanel'
+import { UpdateBanner, useUpdater } from './components/UpdateNotice'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { collectAttachmentIds } from './lib/doc'
 import { ipc, type NoteSummary, type TagCount } from './lib/ipc'
@@ -109,6 +110,14 @@ export function App() {
   const retriesRef = useRef(0)
   // 已删除的笔记 id：保存失败后不该把它们的内容再放回 pending 重试。
   const abandonedRef = useRef<Set<number>>(new Set())
+
+  // 更新检查。启动时静默查一次：查到新版才出横幅，没有新版或查询失败一个字都不显示
+  // （理由见 lib/updater.ts）。手动检查的入口在设置面板里，那边是另一份状态。
+  const updater = useUpdater()
+  const checkUpdate = updater.check
+  useEffect(() => {
+    void checkUpdate('startup')
+  }, [checkUpdate])
 
   // 选中的标签可能因为笔记被删、被改而在库里彻底消失，这时按「全部」处理。
   const activeTag = resolveActiveTag(selectedTag, tags)
@@ -543,6 +552,9 @@ export function App() {
 
   return (
     <div className="app">
+      {/* 绝大多数启动里这里什么都不渲染——没有新版、或者根本没查通，都归 idle。 */}
+      <UpdateBanner updater={updater} />
+
       <aside className="sidebar">
         <div className="sidebar-actions">
           <button type="button" className="primary" onClick={() => void createNote()}>

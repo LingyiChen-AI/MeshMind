@@ -634,6 +634,53 @@ label.settings-row {
   border-top: 1px solid var(--border);
 }
 
+/* ---------- 更新 ---------- */
+/* 顶部横幅。绝对定位而不是插进流里：更新提示是临时的，
+   让它把整个布局往下推一格，关掉的时候界面又跳回去，编辑区会跟着抖一下。
+   和底部的 .error-bar 是同一套做法。 */
+.update-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 14px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  border-bottom: 1px solid var(--border);
+  /* 低于错误栏（30）：两者同时出现时，错误是更要紧的那个 */
+  z-index: 25;
+}
+
+.update-text {
+  margin-right: auto;
+}
+
+/* 检查失败、下载失败都用它。红色是刻意的：更新这条链路上的失败
+   （签名校验不过、包下不下来）如果和普通说明一个颜色，就等于没说。 */
+.update-error {
+  color: #dc2626;
+}
+
+.update-version {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.update-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.update-notes {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
 /* ---------- 错误栏 ---------- */
 .error-bar {
   position: absolute;

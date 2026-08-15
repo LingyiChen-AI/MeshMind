@@ -7,7 +7,7 @@
 import { test as base, type Page } from '@playwright/test'
 
 import { installMock } from './mock/install'
-import { initialState, type MockInit, type MockSearchHit } from './mock/state'
+import { initialState, type MockInit, type MockSearchHit, type MockUpdate } from './mock/state'
 
 export interface IpcCall {
   cmd: string
@@ -38,6 +38,7 @@ interface MockBridge {
   clearFailure(cmd: string): void
   setDelay(cmd: string, ms: number): void
   setSearchHits(hits: MockSearchHit[] | null): void
+  setUpdate(update: MockUpdate | null): void
   notes(): unknown[]
   settings(): Record<string, string>
 }
@@ -55,6 +56,9 @@ export interface MockHandle {
   setDelay(cmd: string, ms: number): Promise<void>
   /// 写死 search_notes 的返回，用来精确构造 matched_terms / source 的组合
   setSearchHits(hits: MockSearchHit[] | null): Promise<void>
+  /// 让更新源「上新」或者「下架」。页面加载之后才调的话，
+  /// 启动那次静默检查已经跑完了，之后查到的只可能来自手动检查。
+  setUpdate(update: MockUpdate | null): Promise<void>
   /// 假存储里现在的笔记（snake_case，和后端返回的形状一致）
   notes(): Promise<unknown[]>
   settings(): Promise<Record<string, string>>
@@ -110,6 +114,15 @@ function handleFor(page: Page): MockHandle {
             h as MockSearchHit[] | null,
           ),
         hits,
+      ),
+
+    setUpdate: (update) =>
+      page.evaluate(
+        (u) =>
+          (window as unknown as { __IPC_MOCK__: MockBridge }).__IPC_MOCK__.setUpdate(
+            u as MockUpdate | null,
+          ),
+        update,
       ),
 
     notes: () =>

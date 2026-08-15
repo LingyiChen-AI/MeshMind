@@ -66,6 +66,8 @@ export function installMock(init: MockInit): void {
 
   const state = {
     notes: initial as Note[],
+    appVersion: init.appVersion,
+    update: init.update,
     settings: { ...init.settings },
     nextId: initial.reduce((max, n) => Math.max(max, n.id), 0) + 1,
     // 单调时钟。真实后端用 `now_ms()`，同一次会话里后写的一定更大；
@@ -105,6 +107,11 @@ export function installMock(init: MockInit): void {
     },
     setSearchHits: (hits: unknown) => {
       state.searchHits = hits as MockInit['searchHits']
+    },
+    // 页面加载之后才让更新源「上新」，这样查到的那一次只可能来自手动检查——
+    // 启动那次早就跑完并且返回了 null。
+    setUpdate: (update: unknown) => {
+      state.update = update as MockInit['update']
     },
     notes: () => state.notes.map((n) => ({ ...n })),
     settings: () => ({ ...state.settings }),
@@ -418,6 +425,67 @@ export function installMock(init: MockInit): void {
         state.settings['startup.autostart'] = args.enabled ? 'true' : 'false'
         return null
 
+      // ---------- 更新器 ----------
+      //
+      // 三个命令的形状照抄 @tauri-apps/plugin-updater 2.10.1 的 dist-js：
+      //
+      // - `check` 返回的是一份**元数据**（不是 Update 对象），JS 侧拿它
+      //   `new Update(metadata)`，其中 `rid` 会进 Resource。没有更新时返回 null。
+      // - `download_and_install` 的进度不走返回值，走 `onEvent` 这个 Channel：
+      //   Channel 在构造时用 transformCallback 注册了自己，args.onEvent.id
+      //   就是回调 id。回调收到的是 `{ index, message }`，**index 必须连续递增**——
+      //   Channel 内部靠它保序，跳号的消息会被压进 pendingMessages 永远不投递，
+      //   症状是进度条停在某个数字不动。
+      // - `restart` 是 process 插件的（relaunch() 调的就是它），真实环境里
+      //   调完进程就没了；这里返回 null，好让测试断言「装完确实请求了重启」。
+
+      case 'plugin:app|version':
+        return state.appVersion
+
+      case 'plugin:updater|check': {
+        if (state.update === null) return null
+        return {
+          rid: 1,
+          currentVersion: state.appVersion,
+          version: state.update.version,
+          date: null,
+          body: state.update.notes,
+          rawJson: {},
+        }
+      }
+
+      case 'plugin:updater|download_and_install': {
+        const plan = state.update
+        // 真实插件在这里会因为拿不到句柄而报错。构造不出这个场景也没关系，
+        // 有个明确的错误总比默默成功强。
+        if (plan === null) throw '没有可用的更新'
+        const channel = args.onEvent as { id: number } | undefined
+        let index = 0
+        const emit = (message: unknown) => {
+          if (!channel) return
+          const callback = state.callbacks.get(channel.id)
+          if (callback) callback({ index: index++, message })
+        }
+        // 返回 Promise：分块之间要真的等一会儿，否则界面从 0% 直接跳到重启，
+        // 「下载进度可见」这条就断言不到。
+        return (async () => {
+          emit({
+            event: 'Started',
+            data:
+              plan.contentLength === null ? {} : { contentLength: plan.contentLength },
+          })
+          for (const chunk of plan.chunks) {
+            await new Promise((resolve) => setTimeout(resolve, plan.chunkDelayMs))
+            emit({ event: 'Progress', data: { chunkLength: chunk } })
+          }
+          emit({ event: 'Finished' })
+          return null
+        })()
+      }
+
+      case 'plugin:process|restart':
+        return null
+
       // ---------- 事件插件 ----------
 
       case 'plugin:event|listen': {
@@ -509,7 +577,10 @@ export function installMock(init: MockInit): void {
         const failure = state.failCommands[cmd]
         // 裸字符串，不是 Error：真实 CommandError 就是这么序列化的。
         if (failure) throw failure
-        return handle(cmd, recorded)
+        // await 而不是直接 return：`plugin:updater|download_and_install` 会返回一个
+        // 真的要跑一会儿的 Promise，不 await 的话 settledAt 会在它落地之前就写下，
+        // 而 settledAt 是「有没有并发」这类断言的唯一依据。
+        return await handle(cmd, recorded)
       } finally {
         call.settledAt = performance.now()
       }

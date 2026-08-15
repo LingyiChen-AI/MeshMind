@@ -17,6 +17,7 @@ import { acceleratorFromEvent, formatAccelerator } from '../lib/accelerator'
 import { ipc } from '../lib/ipc'
 import { isMac } from '../lib/platform'
 import { type AppSettings, parseSettings } from '../lib/settings'
+import { UpdateSettingsSection } from './UpdateNotice'
 
 /** 哪一项正在提交。同一时刻只允许一项在途，其余控件一起禁用。 */
 type Busy = 'hotkey' | 'dock' | 'autostart' | null
@@ -271,6 +272,11 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 登录系统后自动在后台启动，随时可以用快捕热键记东西。
               </p>
             </section>
+
+            {/* 手动检查更新。和启动时那次静默检查相反，这里**每一种结果都要说话**：
+                用户主动点了一下却什么都没变，他分不清是已经最新还是按钮坏了。
+                这一节自带状态与 IPC，不读设置表，只是借这个面板当入口。 */}
+            <UpdateSettingsSection />
           </div>
         ) : null}
 
