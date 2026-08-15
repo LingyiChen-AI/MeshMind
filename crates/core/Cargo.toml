@@ -1,0 +1,19 @@
+[package]
+name = "meshmind-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+imagesize = "0.15.0"
+jieba-rs = "0.10.3"
+pinyin = "0.11.0"
+regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+uuid = { version = "1.24.1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
