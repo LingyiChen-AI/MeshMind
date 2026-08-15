@@ -7,3 +7,9 @@ src-tauri/target/
 target
 src-tauri/gen/
 app-icon.png
+
+# 密钥与环境文件
+*.key
+*.pem
+.env
+.env.*
