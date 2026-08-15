@@ -31,6 +31,13 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 更新器：前端启动时静默查一次、设置面板里可以手动查。
+        // 没有 `plugins.updater` 配置（endpoints + pubkey）时插件照常注册，
+        // 只是运行时 `check()` 会直接报错——前端把启动时的失败咽掉、只 console.warn，
+        // 手动检查则把错误摆到面板上。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // 更新装完要重启应用才生效，relaunch() 在这个插件里。
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // 迁移失败必须就地崩溃，绝不静默降级：带着一个半迁移的库继续跑，

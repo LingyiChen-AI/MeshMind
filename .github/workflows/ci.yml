@@ -30,10 +30,14 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            # tauri.conf.json 里 bundle.targets 同时写了 dmg 和 msi，
+            # tauri.conf.json 里 bundle.targets 同时写了 app / dmg / msi，
             # 但 msi 只能在 Windows 上打，dmg 只能在 macOS 上打（无法交叉构建），
             # 所以这里按平台显式指定 --bundles，避免撞上不支持的目标。
-            bundles: dmg
+            #
+            # macOS 上必须带 app：更新包（.app.tar.gz）是从 .app 打出来的，
+            # 只打 dmg 的话 createUpdaterArtifacts 会退化成一句 warning、
+            # 一个更新产物都不出——而那正是发版时才会发现的失败。
+            bundles: app,dmg
           - os: windows-latest
             bundles: msi
 
