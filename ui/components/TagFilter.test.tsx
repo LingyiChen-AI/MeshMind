@@ -2,7 +2,7 @@
 // （曾经有纯函数住在 .tsx 里而悄悄零覆盖）。测的仍是纯函数，不需要 DOM，
 // 所以 environment 留在 node。
 //
-// 标签的聚合与排序已经搬到 src/lib/tags.ts（见 tags.test.ts）；
+// 标签的聚合与排序已经搬到 ui/lib/tags.ts（见 tags.test.ts）；
 // 这里只剩组件自己拥有的那点交互逻辑。
 
 import { describe, expect, it } from 'vitest'

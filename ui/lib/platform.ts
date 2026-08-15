@@ -1,7 +1,7 @@
 // 平台判断 —— 只服务于「界面上该显示哪个按键」这一件事。
 //
 // 真正的快捷键有两套来源，这里的文案必须跟它们对得上：
-//   1. 全局捕捉热键在 Rust 侧注册（src-tauri/src/shortcut.rs，权威）：
+//   1. 全局捕捉热键在 Rust 侧注册（crates/shell/src/shortcut.rs，权威）：
 //      macOS 是 Opt+Space，其余平台是 Ctrl+Alt+Space。
 //   2. 搜索面板（⌘/Ctrl+K）和快捕保存（⌘/Ctrl+Enter）是前端自己监听的，
 //      判断条件都是 `metaKey || ctrlKey`，所以两个平台按各自习惯的那个键即可。
@@ -32,7 +32,7 @@ export const isMac: boolean =
   typeof navigator === 'undefined' ? false : detectIsMac(navigator.userAgent)
 
 export interface ShortcutLabels {
-  /** 全局捕捉热键，跟 src-tauri/src/shortcut.rs 注册的一致。 */
+  /** 全局捕捉热键，跟 crates/shell/src/shortcut.rs 注册的一致。 */
   capture: string
   /** 主窗口唤起搜索面板。 */
   search: string

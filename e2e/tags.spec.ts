@@ -5,7 +5,7 @@
 
 import { openApp, test, expect } from './fixtures'
 import { note, notes } from './mock/state'
-import { PAGE_SIZE } from '../src/lib/pagination'
+import { PAGE_SIZE } from '../ui/lib/pagination'
 
 /// 60 条笔记，带 #rust 的那条是 id 最小、更新最早的一条——
 /// 它排在第 60 位，铁定不在首屏那一页里。

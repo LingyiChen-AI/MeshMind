@@ -74,8 +74,8 @@ CI 里跑不了，也没法可靠地断言，只能人工确认。这份清单�
       （同上，`purge_note` / `purge_all_deleted` 也曾漏注册）
 - [ ] 重启应用后，笔记、标签、图片都还在
 
-> 注：上面两条带「曾经」的条目对应一次真实缺陷——`src/lib/ipc.ts` 调的命令
-> 在 `src-tauri/src/main.rs` 的 `generate_handler!` 里没注册，TS 和 Rust 两边
+> 注：上面两条带「曾经」的条目对应一次真实缺陷——`ui/lib/ipc.ts` 调的命令
+> 在 `crates/shell/src/main.rs` 的 `generate_handler!` 里没注册，TS 和 Rust 两边
 > 都不会报错，只在运行时 reject「Command xxx not found」。现在
 > `e2e/contract.spec.ts` 会把三份命令清单对起来，同类问题不会再溜过去；
 > 但**人工清单上的这两条仍然要留着**——契约守卫只保证命令注册了，

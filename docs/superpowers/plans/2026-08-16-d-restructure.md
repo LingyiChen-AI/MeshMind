@@ -217,6 +217,17 @@ Expected: 双平台 `success`。
 - **`contract.spec.ts` 的反证做过**：注释掉一个 `generate_handler!` 条目它会红
 - 代码注释里的跨语言契约路径已更新（`docs/superpowers/` 下的历史文档保持原样）
 
+> **历史文档中的路径为写作时的布局。** `docs/superpowers/` 下的 spec 与 plan
+> （含本文件正文）里出现的 `src/` 与 `src-tauri/` 是当时的真实目录，本次重构
+> 刻意不改——改了就成了伪造历史。读到那些路径时按下面的对照表换算：
+>
+> | 写作时 | 现在 |
+> | --- | --- |
+> | `src/` | `ui/` |
+> | `src-tauri/` | `crates/shell/` |
+>
+> 活的文档（`docs/manual-verification.md`）与代码注释里的路径已经更新到新布局。
+
 ## 明确不做
 
 任何逻辑改动。这是纯重命名，出现「顺手改一下」的冲动就打住——重构和改逻辑混在一起，出了问题没法二分定位。

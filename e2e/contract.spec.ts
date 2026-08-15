@@ -3,7 +3,7 @@
 // 这条测试不开浏览器，纯读文件。它存在的理由是一次真事：`ipc.ts` 里有四个命令
 // （list_notes_by_tag / list_all_tags / purge_note / purge_all_deleted）
 // 前端一直在调，`crates/core` 里对应的函数也一直有、还带着测试，
-// 但 `src-tauri` 从没把它们包成 `#[tauri::command]`、也没写进 `generate_handler!`。
+// 但 `crates/shell` 从没把它们包成 `#[tauri::command]`、也没写进 `generate_handler!`。
 // TS 编译器看不见 Rust，Rust 也不知道前端调了什么，两边都不会报错——
 // 症状只会在运行时出现（主窗口一启动就弹「Command list_all_tags not found」，
 // 标签筛选和回收站的彻底删除整个是死的）。
@@ -30,14 +30,14 @@ function matchAll(source: string, pattern: RegExp): string[] {
 /// 前端实际会 invoke 的命令名。`ipc.ts` 是唯一允许调 invoke 的地方，
 /// 所以扫它一个文件就够。
 function frontendCommands(): string[] {
-  const source = read('src/lib/ipc.ts')
+  const source = read('ui/lib/ipc.ts')
   return [...new Set(matchAll(source, /(?:invoke|call)(?:<.*>)?\(\s*'([a-z_]+)'/g))].sort()
 }
 
 /// 外壳真正注册进 `generate_handler!` 的命令。没进这张表的命令，
 /// 前端调过去只会得到 "Command xxx not found"。
 function registeredCommands(): string[] {
-  const source = read('src-tauri/src/main.rs')
+  const source = read('crates/shell/src/main.rs')
   const block = /generate_handler!\[([\s\S]*?)\]/.exec(source)
   expect(block, 'main.rs 里找不到 generate_handler!').not.toBeNull()
   return [...new Set(matchAll(block?.[1] ?? '', /commands::(\w+)/g))].sort()

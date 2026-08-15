@@ -1,7 +1,7 @@
 // 设置项的键名与「字符串 ↔ 语义」的翻译。
 //
 // 外壳（Rust）只认字符串：`get_settings` 返回的是一张 BTreeMap<String, String>，
-// 值的解释权全在前端。这份翻译必须和 src-tauri/src/settings.rs 逐字对齐——
+// 值的解释权全在前端。这份翻译必须和 crates/shell/src/settings.rs 逐字对齐——
 // 对不上的后果不是报错而是**静默的不一致**：设置页显示「已开启」，
 // 而下次启动时外壳按 false 解释，用户会以为开关坏了。
 //

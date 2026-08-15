@@ -1,11 +1,11 @@
 node_modules/
 dist/
-src-tauri/target/
+crates/shell/target/
 .DS_Store
 *.log
 
 target
-src-tauri/gen/
+crates/shell/gen/
 app-icon.png
 
 # Playwright 的报告与 trace 产物

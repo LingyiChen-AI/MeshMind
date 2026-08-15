@@ -1,7 +1,7 @@
 // 加速键字符串：KeyboardEvent → 字符串（录制），以及字符串 → 给人看的显示名。
 //
 // 语法由外壳侧的 `global-hotkey`（`Shortcut::from_str`）定义，见
-// src-tauri/src/shortcut.rs 的 ACCELERATOR_SYNTAX：
+// crates/shell/src/shortcut.rs 的 ACCELERATOR_SYNTAX：
 //   - `+` 连接，**修饰键必须全排在主键前面，且只能有一个主键**（`Ctrl+Shift+K` 合法，
 //     `Ctrl+K+Shift` 不合法）
 //   - 大小写不敏感

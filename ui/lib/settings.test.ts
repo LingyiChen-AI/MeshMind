@@ -56,7 +56,7 @@ describe('writeBool', () => {
 })
 
 describe('defaultCaptureHotkey', () => {
-  // 对应 src-tauri/src/shortcut.rs 的 capture_hotkey()：mac 是 ALT+Space，
+  // 对应 crates/shell/src/shortcut.rs 的 capture_hotkey()：mac 是 ALT+Space，
   // 其余平台是 CONTROL|ALT+Space。
   it('按平台给出外壳实际注册的那个键', () => {
     expect(defaultCaptureHotkey(true)).toBe(MAC_DEFAULT_CAPTURE_HOTKEY)

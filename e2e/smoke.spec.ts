@@ -2,7 +2,7 @@
 
 import { openApp, test, expect } from './fixtures'
 import { note, notes } from './mock/state'
-import { PAGE_SIZE } from '../src/lib/pagination'
+import { PAGE_SIZE } from '../ui/lib/pagination'
 
 test('主窗口加载后拉取笔记列表', async ({ page }) => {
   const mock = await openApp(page, { notes: [note(1, '知识图谱')] })

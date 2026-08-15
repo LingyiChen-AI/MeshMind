@@ -105,7 +105,7 @@ export function Capture() {
    * **不调 confirm_quit**：那是主窗口的活儿。这里也调的话，两个窗口谁先存完谁就先
    * 让外壳退出——快捕这边只有一次 create_note，几乎总是先完成，于是主窗口的落盘
    * 会在写到一半时被 exit(0) 打断。而主窗口是不可能不存在的（点叉只是隐藏，
-   * 见 src-tauri/src/main.rs 的 CloseRequested 处理），把回执交给它是安全的；
+   * 见 crates/shell/src/main.rs 的 CloseRequested 处理），把回执交给它是安全的；
    * 万一它真的没响应，外壳的 2 秒兜底仍然兜得住。
    *
    * 也不 emit('note-saved')：主窗口正在退出，刷新列表没有意义。

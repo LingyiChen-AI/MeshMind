@@ -36,7 +36,7 @@ describe('shortcutLabels', () => {
     })
   })
 
-  // 全局热键文案必须跟 src-tauri/src/shortcut.rs 注册的 CONTROL|ALT + Space 一致。
+  // 全局热键文案必须跟 crates/shell/src/shortcut.rs 注册的 CONTROL|ALT + Space 一致。
   it('非 mac 用 Ctrl 系写法', () => {
     expect(shortcutLabels(false)).toEqual({
       capture: 'Ctrl+Alt+Space',
