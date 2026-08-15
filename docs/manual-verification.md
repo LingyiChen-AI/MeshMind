@@ -1,5 +1,32 @@
 # MeshMind 手工验证清单
 
+## CI 已覆盖哪些、这份清单还剩哪些
+
+自 2026-08-16 起，仓库 `LingyiChen-AI/MeshMind` 上有 GitHub Actions CI
+（`.github/workflows/ci.yml`，**macOS + Windows 双平台矩阵**），每次 push 到 `main` 都会跑。
+
+**以下项目已由 CI 在两个平台上自动覆盖，人工不必重复：**
+
+- 前端单元测试（`pnpm test`）与类型检查 / 构建（`pnpm build`）
+- Rust 全量测试（`cargo test --workspace --locked`）
+- Clippy（`-D warnings`）与 `cargo fmt --check`
+- **安装包能否产出**：macOS 出 `.dmg`、Windows 出 `.msi`，产物上传到 run 的 artifacts（保留 7 天）
+
+也就是说「代码在 Windows 上能不能编、测试过不过、包打不打得出来」这类问题，
+现在由 CI 兜底，不用再人肉在 Windows 机器上跑一遍。
+下载 CI 产出的安装包（`gh run download <run-id>`）直接拿来做人工验证即可。
+
+**以下仍然只能人工做，CI 结构上够不着：**
+
+- 窗口行为（显示 / 隐藏 / 多显示器 / DPI 缩放）
+- 全局热键（注册、双触发过滤、与输入法冲突、被占用时的降级）
+- 系统托盘（图标观感、菜单项、退出后进程是否真的消失）
+- 真实剪贴板（截图粘贴、富文本粘贴）
+- **真机安装**（Gatekeeper 放行、WebView2 缺失时的引导、中文用户名账户）
+- 数据目录的真实落盘与迁移、强杀进程后的 SQLite WAL 行为
+
+下面的清单就是这剩下的部分。
+
 ## 这份清单是干什么的
 
 自动化测试（`pnpm test` / `cargo test --workspace`）只能覆盖纯逻辑：数据库、检索、命令层的输入输出。
@@ -137,6 +164,53 @@ CI 里跑不了，也没法可靠地断言，只能人工确认。这份清单�
 - [ ] 装了旧版本再装新版本，数据保留、迁移正常
       （MVP 阶段只有 v1 一个 schema 版本，这条现在跑不出问题，
       留作占位，避免第一次真正发版时才想起来）
+
+---
+
+## Windows 首次验证纪要（2026-08-16）
+
+这是 Windows 侧**第一次**真正跑起来——在此之前所有 Rust / 前端代码只在 macOS 上验证过，
+Windows 上一行都没执行过。记在这里是给三个月后的自己看的：同类问题会在加新依赖时重现。
+
+**结果：首次 CI 双平台一次通过，无需修复。**
+
+| 平台 | 结论 | 耗时 |
+| --- | --- | --- |
+| macos-latest | success | 约 7 分钟 |
+| windows-latest | success | 约 13 分钟 |
+
+Windows 上首次全部通过的步骤：`pnpm install --frozen-lockfile` → `pnpm test` →
+`pnpm build` → `cargo test --workspace` → `cargo clippy -- -D warnings` →
+`cargo fmt --check` → `pnpm tauri build --bundles msi` → 产物上传（约 7 MB 的 `.msi`）。
+
+### 事前预判过、但实际没有发生的问题
+
+推之前列了一张分诊表，逐条记下来为什么没炸——将来真炸了可以直接对照：
+
+- **MSVC / `cl.exe` 找不到，`libsqlite3-sys` 编不过**：没发生。`windows-latest` 镜像自带
+  Visual Studio Build Tools，默认 target 是 `x86_64-pc-windows-msvc`，`cc` crate 直接找得到。
+  **不需要** `ilammy/msvc-dev-cmd`，也不需要装 LLVM / MinGW。
+- **`pnpm install --frozen-lockfile` 报 lockfile 漂移**：没发生，`pnpm-lock.yaml` 与
+  `package.json` 一致。
+- **只在 Windows 上失败的测试（行尾 / 路径分隔符）**：没发生。推之前先加了 `.gitattributes`
+  （`* text=auto eol=lf`）把行尾锁死，避开了 `include_str!` 的 SQL 与测试里多行字面量
+  在 Windows 检出时被转成 CRLF 的风险。这是**预防性措施**，不是事后修复。
+- **`tauri build` 找不到 WiX**：没发生，Tauri 首次运行会自己下载 WiX。
+- **路径过长（260 字符限制）**：没发生。
+- **`cargo fmt --check` 只在 Windows 上失败**：没发生，同样归功于 `.gitattributes`。
+- **打包超时**：没发生。Windows 冷缓存全量编译 + 打包总共约 13 分钟，离超时很远。
+
+### 结论与注意事项
+
+- 现在 `main` 上每次 push 都会在两个平台产出安装包。**要人工验证时不必自己打包**，
+  直接 `gh run download <run-id>` 拿 CI 的产物，这样验的就是 CI 真正产出的那个包。
+- CI 的 cargo 命令带了 `--locked`：`Cargo.lock` 与 manifest 不一致会立刻失败，
+  而不是 CI 悄悄改 lockfile 后照样通过（本项目踩过一次 lockfile 未提交）。
+  **加新 crate 后记得把 `Cargo.lock` 一起提交。**
+- CI runner 的用户名永远是 ASCII，**中文用户名下的 `%APPDATA%` 路径问题 CI 永远测不出来**，
+  这条必须人工验（见「韧性与边界」一节）。
+- 同理，WebView2 Runtime 在 runner 上是预装的，**干净 Windows 机器上的 WebView2 缺失引导
+  CI 也覆盖不到**。
 
 ---
 
