@@ -8,6 +8,11 @@ target
 src-tauri/gen/
 app-icon.png
 
+# Playwright 的报告与 trace 产物
+test-results/
+playwright-report/
+.playwright/
+
 # 密钥与环境文件
 *.key
 *.pem
