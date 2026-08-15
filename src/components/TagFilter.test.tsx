@@ -1,44 +1,26 @@
-// 放在 .tsx 里既为了挨着组件，也顺带证明 vitest 的 include 真的收得到 .tsx。
-// collectTags 是纯函数，不需要 DOM，所以 environment 仍是 node。
+// 放在 .tsx 里既为了挨着组件，也顺带证明 vitest 的 include 真的收得到 .tsx
+// （曾经有纯函数住在 .tsx 里而悄悄零覆盖）。测的仍是纯函数，不需要 DOM，
+// 所以 environment 留在 node。
+//
+// 标签的聚合与排序已经搬到 src/lib/tags.ts（见 tags.test.ts）；
+// 这里只剩组件自己拥有的那点交互逻辑。
 
 import { describe, expect, it } from 'vitest'
 
-import { collectTags } from './TagFilter'
-import type { NoteSummary } from '../lib/ipc'
+import { toggleTag } from './TagFilter'
 
-function note(id: number, tags: string[]): NoteSummary {
-  return { id, uuid: `u${id}`, title: `笔记 ${id}`, excerpt: '', updatedAt: id, tags }
-}
-
-describe('collectTags', () => {
-  it('没有笔记时返回空数组', () => {
-    expect(collectTags([])).toEqual([])
+describe('toggleTag', () => {
+  it('点未选中的标签就选中它', () => {
+    expect(toggleTag('工作', null)).toBe('工作')
+    expect(toggleTag('工作', '想法')).toBe('工作')
   })
 
-  it('聚合并统计条数', () => {
-    const tags = collectTags([note(1, ['工作']), note(2, ['工作', '想法']), note(3, [])])
-    expect(tags).toEqual([
-      { name: '工作', count: 2 },
-      { name: '想法', count: 1 },
-    ])
+  it('再点一次已选中的标签取消筛选', () => {
+    expect(toggleTag('工作', '工作')).toBeNull()
   })
 
-  it('同条笔记里的重名标签只算一次', () => {
-    expect(collectTags([note(1, ['读书', '读书'])])).toEqual([{ name: '读书', count: 1 }])
-  })
-
-  it('忽略空白标签', () => {
-    expect(collectTags([note(1, ['', '   ', '有效'])])).toEqual([{ name: '有效', count: 1 }])
-  })
-
-  it('两侧空白视作同一个标签', () => {
-    expect(collectTags([note(1, [' 工作']), note(2, ['工作 '])])).toEqual([
-      { name: '工作', count: 2 },
-    ])
-  })
-
-  it('按条数降序、同条数按名称排序', () => {
-    const tags = collectTags([note(1, ['b', 'a', 'c']), note(2, ['c'])])
-    expect(tags.map((t) => t.name)).toEqual(['c', 'a', 'b'])
+  it('区分大小写与空白，不做归一化（标签名由后端给定）', () => {
+    expect(toggleTag('Work', 'work')).toBe('Work')
+    expect(toggleTag(' 工作', '工作')).toBe(' 工作')
   })
 })

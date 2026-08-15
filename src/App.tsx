@@ -1,8 +1,14 @@
 // 主窗口：左侧笔记流 + 右侧编辑器，⌘/Ctrl+K 唤起搜索。
 //
-// 状态归属：笔记列表、当前笔记正文、搜索面板开关都在这里；
-// NoteList / TagFilter / SearchPanel 是纯展示组件。所有 IPC 调用都在这一层收口并 catch，
+// 状态归属：笔记列表（分页）、标签、当前笔记正文、面板开关都在这里；
+// NoteList / TagFilter 是纯展示组件。主列表相关的 IPC 都在这一层收口并 catch，
 // 失败统一落到底部错误栏——ipc 层 reject 的是字符串，String(e) 就是可读的中文消息。
+// SearchPanel / TrashPanel 自带独立的数据流（各自的检索与回收站列表），
+// 在自己内部发 IPC、自己显示错误，只在数据真的变了之后回调这里刷新。
+//
+// 列表分页的两种刷新语义，改之前先读明白（reloadList / refreshAfterSave 各自的注释）：
+// 「集合变了」重拉已加载的全部页，「保存完了」只重拉第一页再并回来。
+// 任何一次刷新都不许把用户退回第一页。
 //
 // 自动保存的关键约束：
 // 1. 待保存的目标（笔记 id + 正文）存在 ref 里而不是闭包里，且在「切换笔记 / 新建 /
@@ -13,15 +19,27 @@
 //    加载新正文覆盖编辑器 → 刚才那次编辑再也没有任何持有者，连卸载兜底都救不回来。
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { NoteList } from './components/NoteList'
 import { SearchPanel } from './components/SearchPanel'
-import { collectTags, TagFilter } from './components/TagFilter'
+import { TagFilter } from './components/TagFilter'
+import { TrashPanel } from './components/TrashPanel'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { collectAttachmentIds } from './lib/doc'
-import { ipc, type NoteSummary } from './lib/ipc'
+import { ipc, type NoteSummary, type TagCount } from './lib/ipc'
+import {
+  appendPage,
+  emptyPage,
+  mergeHead,
+  nextOffset,
+  PAGE_SIZE,
+  refreshLimit,
+  replacePage,
+  type Paged,
+} from './lib/pagination'
 import { keys } from './lib/platform'
+import { resolveActiveTag, sortTags } from './lib/tags'
 
 const AUTOSAVE_MS = 800
 
@@ -43,15 +61,29 @@ const STATUS_TEXT: Record<SaveStatus, string> = {
 }
 
 export function App() {
-  const [notes, setNotes] = useState<NoteSummary[]>([])
+  const [page, setPageState] = useState<Paged<NoteSummary>>(emptyPage<NoteSummary>())
+  const [listLoading, setListLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [tags, setTags] = useState<TagCount[]>([])
   const [currentId, setCurrentId] = useState<number | null>(null)
   const [body, setBody] = useState<string>(EMPTY_DOC)
   const [status, setStatus] = useState<SaveStatus>('idle')
   const [searchOpen, setSearchOpen] = useState(false)
+  const [trashOpen, setTrashOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [rebuilding, setRebuilding] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+
+  // 分页状态同时存进 ref：刷新和「加载更多」都在 await 之后才用到它，
+  // 那时闭包里的 page 已经可能是上一轮的了。setPage 是唯一的写入口，两者不会分家。
+  const pageRef = useRef(page)
+  const setPage = useCallback((next: Paged<NoteSummary>) => {
+    pageRef.current = next
+    setPageState(next)
+  }, [])
+  // 「加载更多」的并发闸：按钮 disabled 挡得住鼠标，挡不住 await 期间被重复触发。
+  const loadingMoreRef = useRef(false)
 
   const timerRef = useRef<number | null>(null)
   const pendingRef = useRef<{ id: number; bodyJson: string } | null>(null)
@@ -62,13 +94,92 @@ export function App() {
   // 已删除的笔记 id：保存失败后不该把它们的内容再放回 pending 重试。
   const abandonedRef = useRef<Set<number>>(new Set())
 
-  const refresh = useCallback(async () => {
+  // 选中的标签可能因为笔记被删、被改而在库里彻底消失，这时按「全部」处理。
+  const activeTag = resolveActiveTag(selectedTag, tags)
+
+  /** 取一页笔记：没选标签走 list_notes，选了走 list_notes_by_tag（筛选在后端做）。 */
+  const listPage = useCallback(
+    (limit: number, offset: number): Promise<NoteSummary[]> =>
+      activeTag === null
+        ? ipc.listNotes(limit, offset)
+        : ipc.listNotesByTag(activeTag, limit, offset),
+    [activeTag],
+  )
+
+  // 写列表之前的守卫：await 期间用户可能已经切了标签，这时旧请求的结果必须丢掉，
+  // 否则「全部」的一页会盖在刚选中的标签结果上，而 chip 还亮着那个标签。
+  const activeTagRef = useRef(activeTag)
+  activeTagRef.current = activeTag
+  const stillCurrent = useCallback((tag: string | null) => activeTagRef.current === tag, [])
+
+  /**
+   * refresh 的语义：**重拉用户已经加载出来的全部页**，而不是退回第一页。
+   * 退回第一页意味着用户翻了十页、删掉一条笔记之后又得从头翻——滚了半天白滚。
+   * 靠 refreshLimit 把「已加载 N 条」换成一次 limit=N 的请求，仍然只发一个 IPC。
+   * 用在删除 / 新建 / 回收站操作 / 快捕窗口存了新笔记这些**集合真的变了**的场合。
+   */
+  const reloadList = useCallback(async () => {
+    const tag = activeTag
+    const limit = refreshLimit(pageRef.current.items.length)
     try {
-      setNotes(await ipc.listNotes())
+      const batch = await listPage(limit, 0)
+      if (stillCurrent(tag)) setPage(replacePage(batch, limit))
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [activeTag, listPage, setPage, stillCurrent])
+
+  /**
+   * 自动保存成功后的刷新：只重拉第一页再并回来。
+   * 保存是高频路径（每 800ms 防抖一次），而它对列表的影响是确定的——列表按
+   * updated_at 倒序，被编辑的那条跳到最前，别的相对顺序不变，拉一页就够。
+   * 按标签筛选时例外：改标签会让笔记直接进出这个集合，位置推不出来，老实重拉全部页。
+   */
+  const refreshAfterSave = useCallback(async () => {
+    if (activeTag !== null) {
+      await reloadList()
+      return
+    }
+    const tag = activeTag
+    try {
+      const head = await listPage(PAGE_SIZE, 0)
+      if (stillCurrent(tag)) setPage(mergeHead(pageRef.current, head, PAGE_SIZE))
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [activeTag, listPage, reloadList, setPage, stillCurrent])
+
+  /** 全库标签。笔记增删改都可能让标签新增或归零消失，所以每次变更后都要重拉。 */
+  const refreshTags = useCallback(async () => {
+    try {
+      setTags(sortTags(await ipc.listAllTags()))
     } catch (err) {
       setError(String(err))
     }
   }, [])
+
+  /** 笔记集合变了：列表和标签一起刷新。两个请求互不依赖，并发发出去。 */
+  const refresh = useCallback(async () => {
+    await Promise.all([reloadList(), refreshTags()])
+  }, [reloadList, refreshTags])
+
+  const loadMore = useCallback(async () => {
+    const current = pageRef.current
+    // hasMore 是终止态：到底之后不再发请求。loadingMoreRef 挡住 await 期间的重复触发。
+    if (!current.hasMore || loadingMoreRef.current) return
+    const tag = activeTag
+    loadingMoreRef.current = true
+    setLoadingMore(true)
+    try {
+      const batch = await listPage(PAGE_SIZE, nextOffset(current))
+      if (stillCurrent(tag)) setPage(appendPage(pageRef.current, batch, PAGE_SIZE))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      loadingMoreRef.current = false
+      setLoadingMore(false)
+    }
+  }, [activeTag, listPage, setPage, stillCurrent])
 
   /**
    * 保存状态的唯一真相来源：pending 空了就是「已保存」，
@@ -120,8 +231,9 @@ export function App() {
       await ipc.updateNote(job.id, job.bodyJson, collectAttachmentIds(job.bodyJson))
       retriesRef.current = 0
       settleStatus()
-      // 标题和摘要由后端从正文推导，存完必须重新拉列表才能看到变化。
-      await refresh()
+      // 标题、摘要、标签都由后端从正文推导，存完必须重新拉才能看到变化。
+      // 这里刻意不走 reloadList：见 refreshAfterSave 的注释。
+      await Promise.all([refreshAfterSave(), refreshTags()])
     } catch (err) {
       if (abandonedRef.current.has(job.id)) {
         // 笔记在保存途中被删掉了：这次失败已经无关紧要，安静收场，别弹红条吓人，
@@ -155,14 +267,37 @@ export function App() {
     if (retryDelay !== null) schedule(retryDelay)
     // 在途期间攒下来的新改动：按正常防抖节奏补一次。
     else if (pendingRef.current !== null && timerRef.current === null) schedule(AUTOSAVE_MS)
-  }, [cancelTimer, refresh, schedule, settleStatus])
+  }, [cancelTimer, refreshAfterSave, refreshTags, schedule, settleStatus])
 
   flushRef.current = flushSave
 
-  // 首屏拉列表
+  // 首屏 / 切换标签筛选：回到第一页重新开始分页。
+  // listPage 的身份只随 activeTag 变，所以这个 effect 不会因为别的 state 抖动而重跑。
+  // alive 标志处理「连点两个标签」的竞态：慢的旧请求回来时不许写进 state。
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    let alive = true
+    setListLoading(true)
+    listPage(PAGE_SIZE, 0).then(
+      (batch) => {
+        if (!alive) return
+        setPage(replacePage(batch, PAGE_SIZE))
+        setListLoading(false)
+      },
+      (err: unknown) => {
+        if (!alive) return
+        setError(String(err))
+        setListLoading(false)
+      },
+    )
+    return () => {
+      alive = false
+    }
+  }, [listPage, setPage])
+
+  // 首屏拉标签（之后由各处变更触发刷新）
+  useEffect(() => {
+    void refreshTags()
+  }, [refreshTags])
 
   // 快捕窗口存完笔记会 emit('note-saved')，主窗口据此刷新列表。
   // listen 是异步的：清理函数不能是 async，所以用 cancelled 标志处理
@@ -214,6 +349,9 @@ export function App() {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
+        // 两个面板都是全屏遮罩，不叠着开：否则 Esc 一次只关掉一层，
+        // 用户会以为按键没生效。
+        setTrashOpen(false)
         setSearchOpen((prev) => !prev)
       }
     }
@@ -312,15 +450,14 @@ export function App() {
     }
   }, [rebuilding])
 
-  const tags = useMemo(() => collectTags(notes), [notes])
-  // 选中的标签可能因为笔记被删、被改而从列表里消失。这时按「全部」处理，
-  // 否则会得到一个空列表加一个已经不存在的筛选条件，用户无从解释。
-  const activeTag =
-    selectedTag !== null && tags.some((tag) => tag.name === selectedTag) ? selectedTag : null
-  const visibleNotes = useMemo(
-    () => (activeTag === null ? notes : notes.filter((note) => note.tags.includes(activeTag))),
-    [notes, activeTag],
-  )
+  /** 回收站里恢复 / 彻底删除之后：主列表和标签都可能变。 */
+  const handleTrashChanged = useCallback(() => {
+    void refresh()
+  }, [refresh])
+
+  const handleRestored = useCallback((note: NoteSummary) => {
+    setNotice(`已恢复《${note.title.trim() || '无标题'}》`)
+  }, [])
 
   return (
     <div className="app">
@@ -336,13 +473,35 @@ export function App() {
         <TagFilter tags={tags} selected={activeTag} onSelect={setSelectedTag} />
         <div className="sidebar-list">
           <NoteList
-            notes={visibleNotes}
+            page={page}
             selectedId={currentId}
+            loading={listLoading}
+            loadingMore={loadingMore}
             onSelect={(id) => void openNote(id)}
             onDelete={(id) => void deleteNote(id)}
+            onLoadMore={() => void loadMore()}
+            emptyHint={
+              activeTag === null ? undefined : (
+                <>
+                  <p>「{activeTag}」下还没有笔记</p>
+                  <p className="hint">点「全部」回到完整列表。</p>
+                </>
+              )
+            }
           />
         </div>
         <div className="sidebar-footer">
+          <button
+            type="button"
+            className="subtle"
+            title="被删除的笔记会先落在回收站，可以恢复"
+            onClick={() => {
+              setSearchOpen(false)
+              setTrashOpen(true)
+            }}
+          >
+            回收站
+          </button>
           <button
             type="button"
             className="subtle"
@@ -373,6 +532,14 @@ export function App() {
 
       {searchOpen ? (
         <SearchPanel onClose={() => setSearchOpen(false)} onPick={handlePick} />
+      ) : null}
+
+      {trashOpen ? (
+        <TrashPanel
+          onClose={() => setTrashOpen(false)}
+          onChanged={handleTrashChanged}
+          onRestored={handleRestored}
+        />
       ) : null}
 
       {error ? (

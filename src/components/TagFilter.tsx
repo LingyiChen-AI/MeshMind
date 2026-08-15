@@ -1,37 +1,20 @@
 // 笔记列表上方的标签筛选条。纯展示组件：标签集合和选中项都由 App 注入。
 //
-// 重要局限：`list_notes` 不接受 tag 参数，筛选完全发生在前端，
-// 聚合与过滤的输入只有**当前已加载的那一页笔记**（默认 limit=100）。
-// 所以这里看到的是「最近 100 条里出现过的标签」，而不是库里的全部标签；
-// 更早的笔记即使带同一个标签也不会被筛出来。要做成真正的全库筛选，
-// 得让后端的 list_notes 支持按 tag 过滤。
+// 标签来自 `ipc.listAllTags()`——**全库**的标签与计数，筛选也由后端的
+// `list_notes_by_tag` 执行。早先的版本是从已加载的那一页笔记里聚合（collectTags），
+// 于是「标签」实际是「最近 100 条里出现过的标签」，筛选也只在那一页内过滤：
+// 更早的笔记带同一个标签也筛不出来，chip 上的计数还比真实值小。那个函数已删除。
 
-import type { NoteSummary } from '../lib/ipc'
+import type { TagCount } from '../lib/ipc'
 
-export interface TagCount {
-  name: string
-  /** 已加载笔记里带这个标签的条数 */
-  count: number
-}
+export type { TagCount }
 
 /**
- * 从已加载的笔记里聚合标签，按条数降序、同条数按名称升序。
- * 同一条笔记里重复出现的同名标签只算一次，否则计数会虚高。
+ * 点一个 chip 之后的新选中项。再点一次已选中的标签就取消筛选——
+ * 比强迫用户去够「全部」顺手。抽成纯函数是因为它是这个组件里唯一有分支的逻辑。
  */
-export function collectTags(notes: NoteSummary[]): TagCount[] {
-  const counts = new Map<string, number>()
-  for (const note of notes) {
-    const seen = new Set<string>()
-    for (const raw of note.tags ?? []) {
-      const name = raw.trim()
-      if (!name || seen.has(name)) continue
-      seen.add(name)
-      counts.set(name, (counts.get(name) ?? 0) + 1)
-    }
-  }
-  return [...counts.entries()]
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'))
+export function toggleTag(clicked: string, selected: string | null): string | null {
+  return clicked === selected ? null : clicked
 }
 
 export interface TagFilterProps {
@@ -64,8 +47,7 @@ export function TagFilter({ tags, selected, onSelect }: TagFilterProps) {
             className={`tag-chip${active ? ' active' : ''}`}
             aria-pressed={active}
             title={`${tag.count} 条笔记`}
-            // 再点一次已选中的标签就取消筛选——比强迫用户去点「全部」顺手。
-            onClick={() => onSelect(active ? null : tag.name)}
+            onClick={() => onSelect(toggleTag(tag.name, selected))}
           >
             #{tag.name}
             <span className="tag-chip-count">{tag.count}</span>

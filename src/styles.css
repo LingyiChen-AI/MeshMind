@@ -293,6 +293,19 @@ button:disabled {
   color: var(--accent);
 }
 
+/* ---------- 分页页脚（列表末尾） ---------- */
+/* 「加载更多」按钮和终止态共用这块，高度一致，列表滚到底不会跳。 */
+.list-more {
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px 14px;
+}
+
+.list-more-end {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 /* ---------- 编辑器 ---------- */
 .editor {
   flex: 1;
@@ -466,6 +479,61 @@ mark {
 
 .search-tip {
   border-top: 1px solid var(--border);
+}
+
+/* ---------- 回收站 ---------- */
+/* 复用 .search-overlay / .search-panel 的骨架，只补自己的头部和条目动作。 */
+.trash-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.trash-title {
+  font-weight: 600;
+}
+
+.trash-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+button.danger {
+  color: #fff;
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+button.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+  border-color: #b91c1c;
+}
+
+.trash-notice {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.trash-item {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.trash-item-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* 空态是两行说明文字，居中并压低对比度，别喧宾夺主 */
+.trash-panel .search-empty p {
+  margin: 2px 0;
 }
 
 /* ---------- 快捕窗口 ---------- */

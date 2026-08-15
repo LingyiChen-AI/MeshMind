@@ -38,10 +38,11 @@ export async function attachmentUrl(id: number): Promise<string> {
   const cached = cache.get(id)
   if (cached) return cached
 
-  const pending = ipc.readAttachment(id).then((bytes) => {
-    const raw = new Uint8Array(bytes)
-    const blob = new Blob([raw], { type: sniffMime(raw) })
-    return URL.createObjectURL(blob)
+  // readAttachment 回的是 ArrayBuffer（raw 通道）。Uint8Array 只是套在同一块内存上的
+  // 视图，给 sniffMime 用，不产生拷贝；Blob 直接吃 ArrayBuffer。
+  const pending = ipc.readAttachment(id).then((buffer) => {
+    const view = new Uint8Array(buffer)
+    return URL.createObjectURL(new Blob([buffer], { type: sniffMime(view) }))
   })
 
   cache.set(id, pending)

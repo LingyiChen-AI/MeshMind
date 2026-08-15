@@ -19,7 +19,14 @@ export function extensionForMime(mime: string): string {
 }
 
 export interface PastedImage {
-  /** 普通数字数组：Tauri IPC 的 JSON 通道不认 Uint8Array。 */
+  /**
+   * 普通数字数组：`store_attachment` 的入参走 Tauri 的 JSON 通道，不认 Uint8Array。
+   *
+   * 待办：读附件已经换成 raw 通道（见 ipc.readAttachment），写这一侧还没有——
+   * 粘贴一张 2MB 的图仍然要序列化成约 7MB 的 JSON 文本，两头各解析一遍。
+   * 要改得先动 Rust 侧的入参类型（`tauri::ipc::Request` 收 raw body），
+   * 属于下一轮的事，这里先保持契约不变。
+   */
   bytes: number[]
   ext: string
 }

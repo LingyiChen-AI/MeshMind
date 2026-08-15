@@ -65,6 +65,17 @@ export interface Attachment {
   height: number | null
 }
 
+/**
+ * 对应 Rust `TagCount`，`list_all_tags` 返回。
+ * 注意这是**全库**统计，不是「已加载的那一页里出现过的标签」。
+ * 两个字段本来就没有下划线，`toCamel` 对它是恒等变换。
+ */
+export interface TagCount {
+  name: string
+  /** 全库带这个标签的未删除笔记条数 */
+  count: number
+}
+
 // ---------- snake_case → camelCase ----------
 
 function camelKey(key: string): string {
@@ -128,6 +139,19 @@ export const ipc = {
     return call<NoteSummary[]>('list_notes', { limit, offset })
   },
 
+  /**
+   * 按标签列出笔记，排序与 listNotes 一致（updated_at DESC）。
+   * 走后端而不是在前端过滤已加载的那一页——否则「筛选」只对最近 N 条生效。
+   */
+  listNotesByTag(tag: string, limit = 100, offset = 0): Promise<NoteSummary[]> {
+    return call<NoteSummary[]>('list_notes_by_tag', { tag, limit, offset })
+  },
+
+  /** 全库标签与计数（未删除的笔记）。 */
+  listAllTags(): Promise<TagCount[]> {
+    return call<TagCount[]>('list_all_tags')
+  },
+
   /** 软删除，可用 restoreNote 撤销 */
   deleteNote(id: number): Promise<void> {
     return call<void>('delete_note', { id })
@@ -139,6 +163,19 @@ export const ipc = {
 
   listDeletedNotes(limit = 100, offset = 0): Promise<NoteSummary[]> {
     return call<NoteSummary[]>('list_deleted_notes', { limit, offset })
+  },
+
+  /**
+   * 彻底删除一条**已软删除**的笔记，不可撤销。
+   * 附件不会立刻消失：解除引用后要等下一轮 collectGarbage（有宽限期）才回收。
+   */
+  purgeNote(id: number): Promise<void> {
+    return call<void>('purge_note', { id })
+  },
+
+  /** 清空回收站，返回彻底删除的条数。不可撤销。 */
+  purgeAllDeleted(): Promise<number> {
+    return call<number>('purge_all_deleted')
   },
 
   searchNotes(query: string, limit = 30): Promise<SearchHit[]> {
@@ -154,8 +191,17 @@ export const ipc = {
     return call<Attachment>('store_attachment', { bytes, ext })
   },
 
-  readAttachment(id: number): Promise<number[]> {
-    return call<number[]>('read_attachment', { id })
+  /**
+   * 读附件字节。**唯一一个绕开 `call`（也就是绕开 `toCamel`）的命令**：
+   * Rust 侧走 Tauri 的 raw 通道直接返回二进制，JS 拿到的是 ArrayBuffer——
+   * 而 `toCamel` 见到非 null 的 object 就会 `Object.entries` 遍历它，
+   * ArrayBuffer 会被拆成一个空对象，字节全丢。
+   *
+   * （改成 raw 通道是为了避开 JSON 数组：一张 2MB 的图走 `number[]`
+   * 序列化出来是 7MB 文本，两头各解析一遍。）
+   */
+  readAttachment(id: number): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('read_attachment', { id })
   },
 
   /** 清理无人引用的附件，返回删除的文件数 */
