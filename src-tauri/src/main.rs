@@ -61,6 +61,7 @@ fn main() {
             commands::store_attachment,
             commands::read_attachment,
             commands::collect_garbage,
+            commands::hide_capture_window,
         ])
         // 用 build + run 而不是一步到位的 run(context)：只有 `App::run` 这条路
         // 能拿到 `RunEvent` 回调，而 Dock 唤起（macOS 的 Reopen）就藏在里面。

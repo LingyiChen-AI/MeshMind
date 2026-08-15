@@ -19,6 +19,20 @@ pub fn show_and_focus<R: Runtime>(app: &AppHandle<R>, label: &str) {
     let _ = window.set_focus();
 }
 
+/// 收起指定窗口。
+///
+/// 与 `show_and_focus` 的「尽力而为、失败即忽略」不同，这里把失败原样抛给调用方：
+/// 这条路径服务的是命令层，前端要靠返回值判断窗口是不是真的收起了。窗口不存在时
+/// 静默返回成功，前端就会以为自己已经关掉了窗口，而它其实还浮在屏幕最上层。
+pub fn hide<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(label) else {
+        return Err(format!("窗口「{label}」不存在，无法收起"));
+    };
+    window
+        .hide()
+        .map_err(|err| format!("收起窗口「{label}」失败: {err}"))
+}
+
 /// 快捕窗口的开关：可见就收起，不可见就唤起。
 pub fn toggle_capture<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window(CAPTURE) else {

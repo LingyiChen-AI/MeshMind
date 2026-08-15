@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口与快捕窗口的默认权限",
+  "description": "主窗口与快捕窗口的默认权限。core:window:default 是纯只读集合（get-all-windows / is-visible / title 之类），不含 allow-hide，所以前端调 getCurrentWindow().hide() 会被 ACL 拒掉；窗口收起的正路是 hide_capture_window 命令，这里单独补 allow-hide 只是给直接调 window API 的路径留一条后路。",
   "windows": ["main", "capture"],
-  "permissions": ["core:default", "global-shortcut:default"]
+  "permissions": [
+    "core:default",
+    "global-shortcut:default",
+    "core:window:allow-hide"
+  ]
 }

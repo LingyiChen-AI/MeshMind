@@ -5,9 +5,10 @@ use meshmind_core::notes::{self, NewNote, Note, NoteSummary};
 use meshmind_core::search::{self, SearchHit};
 use meshmind_core::{now_ms, CoreError};
 use serde::{Serialize, Serializer};
-use tauri::State;
+use tauri::{AppHandle, Runtime, State};
 
 use crate::state::AppState;
+use crate::window;
 
 /// 传给前端的错误。
 ///
@@ -20,6 +21,12 @@ pub struct CommandError(String);
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
+    }
+}
+
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self(message)
     }
 }
 
@@ -134,12 +141,41 @@ pub fn rebuild_index(state: State<'_, AppState>) -> CmdResult<usize> {
     Ok(notes::rebuild_index(&mut conn)?)
 }
 
+/// 扩展名的长度上限。真实扩展名都在 5 个字符以内（jpeg / webp / heic），
+/// 16 已经宽到不会误伤任何合法输入，同时把「超长字符串塞进路径」这类玩法挡在外面。
+const MAX_EXT_LEN: usize = 16;
+
+/// 校验附件扩展名。
+///
+/// `ext` 会被 `attachments::relative_path` 直接拼进文件名再 `join` 到附件根目录下，
+/// 所以它是一个能影响写盘位置的参数：`".."`、`"/"`、`"\\"` 之类的字符一旦放过去，
+/// 就等于把任意路径写的能力交给了调用方。命令层是这个参数唯一的入口，把关放在这里。
+/// 只放行 ASCII 字母数字：合法扩展名本来就在这个集合内，白名单比黑名单少一类漏网之鱼。
+fn validate_ext(ext: &str) -> CmdResult<()> {
+    if ext.is_empty() {
+        return Err(CommandError("附件扩展名 ext 不能为空".into()));
+    }
+    if ext.len() > MAX_EXT_LEN {
+        return Err(CommandError(format!(
+            "附件扩展名 ext 过长（{} 字节，上限 {MAX_EXT_LEN}）",
+            ext.len()
+        )));
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(CommandError(format!(
+            "附件扩展名 ext 只能包含 ASCII 字母和数字，实际收到: {ext:?}"
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn store_attachment(
     state: State<'_, AppState>,
     bytes: Vec<u8>,
     ext: String,
 ) -> CmdResult<Attachment> {
+    validate_ext(&ext)?;
     let conn = conn!(state);
     Ok(attachments::store(
         &conn,
@@ -171,9 +207,68 @@ pub fn collect_garbage(state: State<'_, AppState>) -> CmdResult<usize> {
     )?)
 }
 
+/// 让快捕窗口收起自己。
+///
+/// 前端本可以直接调 `getCurrentWindow().hide()`，但那条路要靠 `core:window:allow-hide`
+/// 这个 ACL 权限，而 `core:window:default` 是纯只读集合、并不包含它——权限一缺，
+/// hide 就被 reject，窗口留在屏幕上不动。走命令层则只依赖 Rust 侧的窗口句柄：
+/// 前端与外壳之间仍然只有命令这一个契约，将来 Tauri 调整默认权限集也炸不到这里。
+#[tauri::command]
+pub fn hide_capture_window<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
+    Ok(window::hide(&app, window::CAPTURE)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_real_extensions() {
+        for ext in [
+            "png", "jpg", "jpeg", "webp", "gif", "bin", "mp4", "7z", "PNG",
+        ] {
+            assert!(validate_ext(ext).is_ok(), "{ext} 应当被放行");
+        }
+    }
+
+    #[test]
+    fn rejects_empty_ext() {
+        let err = validate_ext("").expect_err("空扩展名应当被拒绝");
+        assert!(err.to_string().contains("ext"), "错误里应点名参数: {err}");
+    }
+
+    #[test]
+    fn rejects_overlong_ext() {
+        let err = validate_ext(&"a".repeat(MAX_EXT_LEN + 1)).expect_err("超长扩展名应当被拒绝");
+        assert!(err.to_string().contains("过长"), "实际: {err}");
+        assert!(
+            validate_ext(&"a".repeat(MAX_EXT_LEN)).is_ok(),
+            "刚好到上限应当放行"
+        );
+    }
+
+    /// 这条是这个校验存在的理由：`ext` 会被拼进写盘路径。
+    #[test]
+    fn rejects_path_traversal_ext() {
+        for ext in [
+            "../../../../evil",
+            "..",
+            "png/../../evil",
+            "png/evil",
+            "png\\evil",
+            "/etc/passwd",
+            "pn g",
+            "png\0",
+            "png.",
+            "png-1",
+            "图片",
+        ] {
+            let err = validate_ext(ext)
+                .expect_err(&format!("{ext:?} 会被拼进写盘路径，应当被拒绝"))
+                .to_string();
+            assert!(err.contains("ext"), "错误里应点名参数，实际: {err}");
+        }
+    }
 
     #[test]
     fn serializes_core_error_as_message_string() {
@@ -285,6 +380,39 @@ mod tests {
             )
             .unwrap();
             assert_eq!(hits[0]["note_id"], id, "SearchHit 字段同样是 snake_case");
+        }
+
+        /// 快捕窗口没建起来时，命令必须报错而不是静默成功：前端拿到 ok 就会
+        /// 认为窗口已经收起，而它其实还浮在最上层——正是这次要修的症状。
+        #[test]
+        fn hide_capture_window_reports_missing_window() {
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![super::super::hide_capture_window])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .unwrap();
+
+            let err = invoke(&webview, "hide_capture_window", serde_json::json!({}))
+                .expect_err("没有 capture 窗口时应当报错");
+            let message = err.as_str().unwrap_or_default();
+            assert!(message.contains("capture"), "错误应点名窗口，实际: {err}");
+        }
+
+        #[test]
+        fn hide_capture_window_hides_existing_window() {
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![super::super::hide_capture_window])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            let capture =
+                tauri::WebviewWindowBuilder::new(&app, crate::window::CAPTURE, Default::default())
+                    .build()
+                    .unwrap();
+
+            invoke(&capture, "hide_capture_window", serde_json::json!({}))
+                .expect("快捕窗口存在时应当收起成功");
         }
 
         #[test]
