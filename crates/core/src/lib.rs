@@ -3,6 +3,7 @@ pub mod db;
 pub mod error;
 pub mod notes;
 pub mod search;
+pub mod settings;
 
 pub use error::{CoreError, Result};
 

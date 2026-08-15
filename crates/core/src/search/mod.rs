@@ -68,8 +68,11 @@ pub fn search(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchHi
     // literal_match 返回 None 说明查询里没有任何可检索字符，这一路直接跳过：
     // 发一个空表达式给 FTS5 会匹配到全部记录。
     if let Some(expr) = query::literal_match(query) {
-        // 高亮词与 MATCH 表达式取自同一条过滤规则，避免两边漂移。
-        let terms = segment::searchable_tokens(query);
+        // 高亮词在 MATCH 表达式的 token 集上再滤一层单字中文虚词。
+        // 两者只朝这一个方向偏：高亮词是可检索 token 的子集，检索行为完全不受影响
+        // （表达式仍由 `query::literal_match` 用完整词序列构造）。理由见
+        // `segment::HIGHLIGHT_STOP_WORDS`。
+        let terms = segment::highlight_terms(query);
         let rows = literal_rows(conn, &expr, limit)?;
         collect(&mut hits, &mut seen, rows, &terms, HitSource::Literal);
     }

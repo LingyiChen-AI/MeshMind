@@ -6,7 +6,10 @@ use crate::error::{CoreError, Result};
 
 /// 迁移脚本按序号排列，下标 + 1 即为该脚本对应的 user_version。
 /// 新增迁移只能往数组末尾追加，永不修改已发布的脚本。
-const MIGRATIONS: &[&str] = &[include_str!("db/migrations/001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("db/migrations/001_init.sql"),
+    include_str!("db/migrations/002_settings.sql"),
+];
 
 /// 打开磁盘数据库，父目录不存在则创建。
 pub fn open(path: &Path) -> Result<Connection> {
@@ -101,6 +104,99 @@ mod tests {
         migrate(&conn).expect("重复迁移不应报错");
     }
 
+    /// `notes::purge` 靠外键级联清 `note_tags` / `note_attachments`，
+    /// 而不是手工 DELETE。级联一旦从 schema 里消失，purge 会静默留下孤儿关联行，
+    /// 那些行会让附件永远算「有引用」而不可回收。这条测试直接钉住 schema 的声明。
+    #[test]
+    fn purge_cascades_are_declared_in_the_schema() {
+        let conn = open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for table in ["note_tags", "note_attachments"] {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                sql.contains("REFERENCES notes (id) ON DELETE CASCADE"),
+                "{table} 缺少对 notes 的级联删除:\n{sql}"
+            );
+        }
+    }
+
+    /// 老用户的库停在 001，升级后必须只跑 002 那一条，且已有数据毫发无损。
+    /// 这条路径是真实存在的（已发布版本就停在 001），跟「空库一次跑完」不是同一件事。
+    #[test]
+    fn migrate_upgrades_a_database_that_stopped_at_001() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO notes (uuid, title, body_json, body_text, created_at, updated_at)
+             VALUES ('u', 't', '{}', 't', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i32);
+        let settings_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(settings_tables, 1, "002 没有被应用");
+        let notes: i64 = conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notes, 1, "增量迁移不该动已有数据");
+    }
+
+    /// 001 是已发布的脚本，永远不能被改；改了的话老库跑不到它、新库跑得到，
+    /// 两边 schema 就此分叉。这条测试钉住「002 只是追加」这个事实。
+    #[test]
+    fn migration_002_is_append_only() {
+        assert!(MIGRATIONS.len() >= 2);
+        assert!(
+            MIGRATIONS[0].contains("CREATE TABLE notes"),
+            "001 的内容被改动了"
+        );
+        assert!(
+            !MIGRATIONS[0].contains("settings"),
+            "settings 表被塞进了 001，必须是独立的 002"
+        );
+        assert!(MIGRATIONS[1].contains("CREATE TABLE settings"));
+    }
+
+    /// 重复迁移到最新版是空操作：不会因为再跑一次 002 撞上 "table already exists"。
+    #[test]
+    fn migrating_twice_does_not_reapply_002() {
+        let conn = open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('theme', 'dark')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).expect("重复迁移不应报错");
+
+        let value: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'theme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(value, "dark", "重复迁移不该重建表、清掉数据");
+    }
+
     #[test]
     fn migrate_creates_all_tables() {
         let conn = open_in_memory().unwrap();
@@ -113,6 +209,7 @@ mod tests {
             "note_attachments",
             "notes_fts",
             "notes_py",
+            "settings",
         ] {
             let count: i64 = conn
                 .query_row(

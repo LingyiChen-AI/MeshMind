@@ -3,8 +3,16 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use rusqlite::{Transaction, params};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+
+/// 一个标签及其笔记数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCount {
+    pub name: String,
+    pub count: i64,
+}
 
 /// `#` 必须位于行首或空白之后，否则 URL 片段（#frag）和 C# 都会被误判成标签。
 /// Rust 正则不支持后顾断言，所以把前导边界写进匹配再用捕获组取标签名。
@@ -55,6 +63,36 @@ pub fn of_note(conn: &rusqlite::Connection, note_id: i64) -> Result<Vec<String>>
         .query_map(params![note_id], |row| row.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(names)
+}
+
+/// 全库标签及其笔记数，按数量降序、同数量按名称升序（保证输出稳定）。
+/// 只统计未软删除的笔记。
+///
+/// 名称升序不是装饰：同数量的标签若不定序，前端的标签云每次刷新都会重排，
+/// 用户刚瞄准的那一项就跑了。
+///
+/// 一个标签若只挂在软删笔记上，它的计数会是 0，这里**不会返回它**
+/// （JOIN 直接把它滤掉了）。这正是标签筛选面板要的语义——列出一个点进去空空如也
+/// 的标签毫无意义。`tags` 表里那行会留着，笔记从回收站恢复后它自然重新出现。
+pub fn all_with_counts(conn: &rusqlite::Connection) -> Result<Vec<TagCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, count(*) AS note_count
+         FROM tags t
+         JOIN note_tags nt ON nt.tag_id = t.id
+         JOIN notes n ON n.id = nt.note_id
+         WHERE n.deleted_at IS NULL
+         GROUP BY t.id, t.name
+         ORDER BY note_count DESC, t.name ASC",
+    )?;
+    let counts = stmt
+        .query_map([], |row| {
+            Ok(TagCount {
+                name: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(counts)
 }
 
 #[cfg(test)]

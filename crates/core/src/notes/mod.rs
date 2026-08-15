@@ -79,17 +79,21 @@ pub fn create(conn: &mut Connection, new: &NewNote, now: i64) -> Result<Note> {
 
 /// 写入两张索引表。rowid 与 notes.id 对齐，这样搜索能直接 JOIN 回 notes。
 fn write_index(tx: &Transaction, id: i64, title: &str, body_text: &str) -> Result<()> {
-    // 逐行切词并在行间插哨兵：body_text 是各个块用 \n 拼起来的，不隔断的话
-    // 上一段的末词和下一段的首词会变成相邻 token，短语查询就会跨段落假阳性。
-    // 标题永远是单行，走同一个函数不会有哨兵产生。
-    let title_tokens = segment::index_tokens(title);
-    let body_tokens = segment::index_tokens(body_text);
-    // 哨兵不含汉字，pinyin_index 对含非汉字的词整词跳过，因此不会进拼音列。
-    let (py_full, py_head) = pinyin::pinyin_index(&body_tokens);
+    // 逐行切词，行边界同时喂给两张索引表：字面列在行间插哨兵、拼音列在行间插
+    // 分隔符。body_text 是各个块用 \n 拼起来的，不隔断的话上一段的末词和下一段的
+    // 首词会连成一片，短语查询和连写拼音查询都会跨段落假阳性。
+    // 标题永远是单行，走同一条路径不会有哨兵/分隔符产生。
+    let title_lines = segment::line_tokens(title);
+    let body_lines = segment::line_tokens(body_text);
+    let (py_full, py_head) = pinyin::pinyin_index(&body_lines);
 
     tx.execute(
         "INSERT INTO notes_fts (rowid, title_seg, body_seg) VALUES (?1, ?2, ?3)",
-        params![id, title_tokens.join(" "), body_tokens.join(" ")],
+        params![
+            id,
+            segment::join_with_sentinel(&title_lines).join(" "),
+            segment::join_with_sentinel(&body_lines).join(" ")
+        ],
     )?;
     tx.execute(
         "INSERT INTO notes_py (rowid, py_full, py_head) VALUES (?1, ?2, ?3)",
@@ -179,8 +183,42 @@ pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<NoteSummar
          FROM notes WHERE deleted_at IS NULL
          ORDER BY updated_at DESC, id DESC
          LIMIT ?1 OFFSET ?2",
-        limit,
-        offset,
+        params![limit, offset],
+    )?;
+    for summary in &mut summaries {
+        summary.tags = tags::of_note(conn, summary.id)?;
+    }
+    Ok(summaries)
+}
+
+/// 按标签列出未删除的笔记，语义与 [`list`] 完全一致：排除软删除、
+/// 按 `updated_at DESC, id DESC` 排序、每条都带上自己的全部标签。
+///
+/// 标签名走**精确相等**，不做前缀或子串匹配——「论」不该翻出「论文」。
+///
+/// # 前提：`tag` 必须已经是小写
+///
+/// 标签入库时由 `tags::parse_tags` 统一转小写，这里直接拿它跟 `tags.name` 比。
+/// 调用方传 `"Rust"` 会得到空结果而不是报错——大小写在这一层没有可靠的还原方式
+/// （SQLite 的 `lower()` 只认 ASCII），与其在内核里做一半的折叠，不如把
+/// 「传小写」定成契约。前端的标签来源本就是 `all_with_counts` 或笔记自带的
+/// `tags` 字段，那两处给出的都已经是小写。
+pub fn list_by_tag(
+    conn: &Connection,
+    tag: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<NoteSummary>> {
+    let mut summaries = query_summaries(
+        conn,
+        "SELECT n.id, n.uuid, n.title, n.body_text, n.updated_at
+         FROM notes n
+         JOIN note_tags nt ON nt.note_id = n.id
+         JOIN tags t ON t.id = nt.tag_id
+         WHERE t.name = ?1 AND n.deleted_at IS NULL
+         ORDER BY n.updated_at DESC, n.id DESC
+         LIMIT ?2 OFFSET ?3",
+        params![tag, limit, offset],
     )?;
     for summary in &mut summaries {
         summary.tags = tags::of_note(conn, summary.id)?;
@@ -196,20 +234,19 @@ pub fn list_deleted(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<No
          FROM notes WHERE deleted_at IS NOT NULL
          ORDER BY deleted_at DESC, id DESC
          LIMIT ?1 OFFSET ?2",
-        limit,
-        offset,
+        params![limit, offset],
     )
 }
 
-fn query_summaries(
+/// 列表查询的公共部分。SQL 必须按 id, uuid, title, body_text, updated_at 取列。
+fn query_summaries<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
-    limit: u32,
-    offset: u32,
+    query_params: P,
 ) -> Result<Vec<NoteSummary>> {
     let mut stmt = conn.prepare(sql)?;
     let summaries = stmt
-        .query_map(params![limit, offset], |row| {
+        .query_map(query_params, |row| {
             let body_text: String = row.get(3)?;
             Ok(NoteSummary {
                 id: row.get(0)?,
@@ -299,6 +336,74 @@ pub fn restore(conn: &mut Connection, id: i64, now: i64) -> Result<()> {
     write_index(&tx, id, &title, &body_text)?;
     tx.commit()?;
     Ok(())
+}
+
+/// 彻底删除一条已软删除的笔记：连同标签关联、附件关联、索引行一并清除。
+///
+/// **只接受已软删除的笔记** —— 硬删一条还活着的笔记应当是调用方的 bug，
+/// 所以这里返回 [`CoreError::NoteNotDeleted`] 而不是默默照做。删掉的东西找不回来，
+/// 这条路径宁可吵闹。笔记压根不存在则是 [`CoreError::NoteNotFound`]，两者分开报，
+/// 免得「传错了 id」和「传了活笔记」在界面上长成同一句话。
+///
+/// `note_tags` / `note_attachments` 靠外键的 `ON DELETE CASCADE` 自动清
+/// （见 `001_init.sql`，`purge_cascades_are_declared_in_the_schema` 钉住这条前提）。
+/// 索引行在软删除时就已经剔除了，这里再删一次是防御性的：`purge` 未必只被回收站
+/// 调用，而一条残留的索引行会让一篇已经不存在的笔记继续出现在搜索结果里，
+/// 随后 JOIN 不到 notes——那是比多执行一条 DELETE 昂贵得多的故障。
+///
+/// # 与附件回收的衔接
+///
+/// purge 只摘引用，不删文件。被 purge 的笔记若是某个附件的最后一个引用，
+/// 该附件即刻变成零引用，但**不会**在这里落盘删除——它要等
+/// [`crate::attachments::collect_garbage`] 的下一轮，且必须已过
+/// [`crate::attachments::GC_GRACE_MS`]（1 小时）宽限期才会被真正回收。
+/// 这正是软删除长期存在的代价所在：软删的笔记一直算「有引用」，附件因此只增不减；
+/// 清空回收站是这条链路上唯一能让附件重新可回收的动作。
+pub fn purge(conn: &mut Connection, id: i64) -> Result<()> {
+    let tx = conn.transaction()?;
+    let deleted_at: Option<i64> = tx
+        .query_row(
+            "SELECT deleted_at FROM notes WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => CoreError::NoteNotFound(id),
+            other => CoreError::Db(other),
+        })?;
+    if deleted_at.is_none() {
+        return Err(CoreError::NoteNotDeleted(id));
+    }
+
+    delete_index(&tx, id)?;
+    tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 清空回收站，返回删除条数。
+///
+/// 逐条走的是和 [`purge`] 相同的清理动作（索引行 + 级联关联），
+/// 但整批在同一个事务里完成：清空回收站要么整体生效、要么整体不生效，
+/// 不留下「笔记删了索引还在」的中间态。
+///
+/// 活着的笔记一根毫毛都不碰。附件的后续回收见 [`purge`] 的说明。
+pub fn purge_all_deleted(conn: &mut Connection) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let ids: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM notes WHERE deleted_at IS NOT NULL")?;
+        stmt.query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    // 索引行按 rowid 逐条删：FTS5 表不是普通表，删不了「所有 rowid 在某集合里」
+    // 之外的花样，也享受不到外键级联。
+    for id in &ids {
+        delete_index(&tx, *id)?;
+    }
+    let removed = tx.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL", [])?;
+    tx.commit()?;
+    debug_assert_eq!(removed, ids.len());
+    Ok(removed)
 }
 
 /// 全量重建两张索引表，返回重建的笔记条数。

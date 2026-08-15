@@ -350,6 +350,91 @@ fn phrase_still_matches_inside_one_paragraph() {
 }
 
 #[test]
+fn concatenated_pinyin_does_not_span_a_paragraph_boundary() {
+    let mut conn = test_conn();
+    seed_lines(
+        &mut conn,
+        &["标题行", "第一段讲知识", "图谱是第二段"],
+        1_000,
+    );
+
+    // 「知识」在第二段末尾、「图谱」在第三段开头，拼音列不隔断的话
+    // 会拼出连续的 zhishitupu，连写查询就跨段落假阳性了。
+    let hits = search::search(&conn, "zhishitupu", 10).unwrap();
+    assert!(hits.is_empty(), "全拼不得跨段落命中: {hits:?}");
+
+    // 首字母列走同一条规则。
+    let hits = search::search(&conn, "zstp", 10).unwrap();
+    assert!(hits.is_empty(), "首字母不得跨段落命中: {hits:?}");
+
+    // 短查询走的是 LIKE 兜底，同样跨不过去。
+    let hits = search::search(&conn, "shitu", 10).unwrap();
+    assert!(hits.is_empty(), "LIKE 兜底也不得跨段落命中: {hits:?}");
+}
+
+#[test]
+fn concatenated_pinyin_still_matches_inside_one_paragraph() {
+    let mut conn = test_conn();
+    let id = seed_lines(
+        &mut conn,
+        &["标题行", "第一段讲知识图谱", "第二段讲别的"],
+        1_000,
+    );
+
+    // 行内的跨词连写是这套设计刻意支持的能力，分隔符不能把它一起打断。
+    for query in ["zhishitupu", "shitu", "jiangzhishitupu"] {
+        let hits = search::search(&conn, query, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{query} 应命中: {hits:?}");
+        assert_eq!(hits[0].note_id, id);
+        assert_eq!(hits[0].source, HitSource::PinyinFull);
+    }
+
+    // 首字母列同理。
+    let hits = search::search(&conn, "zstp", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note_id, id);
+    assert_eq!(hits[0].source, HitSource::PinyinHead);
+}
+
+#[test]
+fn single_line_note_keeps_its_pinyin_behaviour() {
+    // 单行笔记压根没有行边界，分隔符不该改变它的任何行为。
+    let mut conn = test_conn();
+    let id = seed(&mut conn, "知识图谱", 1_000);
+    for (query, source) in [
+        ("zhishitupu", HitSource::PinyinFull),
+        ("tupu", HitSource::PinyinFull),
+        ("zstp", HitSource::PinyinHead),
+        ("zs", HitSource::PinyinHead),
+    ] {
+        let hits = search::search(&conn, query, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{query} 应命中: {hits:?}");
+        assert_eq!(hits[0].note_id, id);
+        assert_eq!(hits[0].source, source);
+    }
+}
+
+#[test]
+fn blank_paragraphs_do_not_break_pinyin_matching() {
+    // 空段落不该在拼音列里留下多余分隔符，把本来相邻的两行拆得更开
+    // 或在串首串尾挂一个悬空分隔符。
+    let mut conn = test_conn();
+    let id = seed_lines(&mut conn, &["", "知识图谱", "", "向量数据库", ""], 1_000);
+
+    for query in ["zhishitupu", "xiangliangshujuku"] {
+        let hits = search::search(&conn, query, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{query} 应命中: {hits:?}");
+        assert_eq!(hits[0].note_id, id);
+    }
+    // 跨行仍然是隔断的。
+    assert!(
+        search::search(&conn, "tupuxiangliang", 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn the_line_sentinel_is_never_exposed_as_a_query_or_a_term() {
     let mut conn = test_conn();
     seed_lines(&mut conn, &["第一段", "第二段", "第三段"], 1_000);
@@ -405,6 +490,70 @@ fn every_matched_term_can_be_located_in_the_returned_text() {
             );
         }
     }
+}
+
+#[test]
+fn matched_terms_drop_single_char_function_words() {
+    let mut conn = test_conn();
+    seed(&mut conn, "知识的图谱很好用", 1_000);
+
+    let hits = search::search(&conn, "知识的图谱", 10).unwrap();
+
+    assert_eq!(hits.len(), 1, "「的」只是不参与高亮，不影响命中");
+    // 「的」若混进高亮词，前端会把摘要里每一个「的」都刷亮。
+    assert!(
+        !hits[0].matched_terms.iter().any(|t| t == "的"),
+        "单字虚词不该进高亮词: {:?}",
+        hits[0].matched_terms
+    );
+    assert_eq!(hits[0].matched_terms, vec!["知识", "图谱"]);
+}
+
+#[test]
+fn filtering_matched_terms_does_not_change_what_matches() {
+    // 降噪只作用于返回给前端的高亮词，MATCH 表达式必须仍带着「的」，
+    // 否则「知识的图谱」会退化成「知识图谱」，把这篇无关笔记也捞出来。
+    let mut conn = test_conn();
+    let with_de = seed(&mut conn, "知识的图谱", 1_000);
+    seed(&mut conn, "知识图谱", 2_000);
+
+    let hits = search::search(&conn, "知识的图谱", 10).unwrap();
+    assert_eq!(
+        ids(&hits),
+        vec![with_de],
+        "短语的邻接语义被改掉了: {hits:?}"
+    );
+}
+
+#[test]
+fn a_query_of_only_function_words_yields_empty_matched_terms() {
+    // 用户就搜了个「的」：照常命中，但一个高亮词都不给——
+    // 前端拿到空数组会整段不高亮，这比刷亮全文的每个「的」诚实。
+    let mut conn = test_conn();
+    seed(&mut conn, "知识的图谱", 1_000);
+
+    let hits = search::search(&conn, "的", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        hits[0].matched_terms.is_empty(),
+        "全虚词查询应返回空高亮词: {:?}",
+        hits[0].matched_terms
+    );
+}
+
+#[test]
+fn single_latin_characters_are_still_highlighted() {
+    // 单字英文不在过滤范围内。
+    let mut conn = test_conn();
+    seed(&mut conn, "维生素 c 的作用", 1_000);
+
+    let hits = search::search(&conn, "维生素 c", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        hits[0].matched_terms.iter().any(|t| t == "c"),
+        "单字英文不该被滤掉: {:?}",
+        hits[0].matched_terms
+    );
 }
 
 #[test]

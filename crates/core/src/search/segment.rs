@@ -40,28 +40,45 @@ pub fn segment_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 逐行切词，每行一组 token；切不出任何 token 的行（空行、纯空白行）直接丢弃，
+/// 不留空组。
+///
+/// 行边界是两张索引表共同的隔断依据：字面列靠它插哨兵，拼音列靠它插分隔符
+/// （见 `pinyin::LINE_SEPARATOR`）。两边共用这一次切词，jieba 只跑一趟。
+///
+/// 丢弃空组是下游的前提：留下空组会让拼音列凭空多出一个分隔符，
+/// 甚至在串首串尾挂上悬空分隔符。
+pub fn line_tokens(text: &str) -> Vec<Vec<String>> {
+    text.lines()
+        .map(segment_tokens)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// 把逐行 token 拼成一条序列，行与行之间插一个 `LINE_SENTINEL`。
+pub fn join_with_sentinel(lines: &[Vec<String>]) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for line in lines {
+        if !tokens.is_empty() {
+            tokens.push(LINE_SENTINEL.to_string());
+        }
+        tokens.extend(line.iter().cloned());
+    }
+    tokens
+}
+
 /// 供写入 FTS5 影子列的 token 序列：逐行切词，行与行之间插一个 `LINE_SENTINEL`。
 ///
 /// 不这么做的话，`tiptap::extract_text` 用 `\n` 拼起来的各个块会被 jieba 拉平成
 /// 一条连续序列，上一段的末词和下一段的首词变成相邻 token，短语查询的邻接保证
 /// 在多段落笔记上就失效了（「第一段讲知识」+「图谱是第二段」会被「知识图谱」命中）。
 pub fn index_tokens(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    for line in text.lines() {
-        let line_tokens = segment_tokens(line);
-        if line_tokens.is_empty() {
-            continue;
-        }
-        if !tokens.is_empty() {
-            tokens.push(LINE_SENTINEL.to_string());
-        }
-        tokens.extend(line_tokens);
-    }
-    tokens
+    join_with_sentinel(&line_tokens(text))
 }
 
 /// token 是否可检索。查询侧唯一的判定入口：构造 MATCH 表达式和挑 `matched_terms`
-/// 都用它，两边规则不会漂移。
+/// 都从它出发，两边规则不会漂移（`matched_terms` 只在它之上再叠一层高亮降噪，
+/// 见 `highlight_terms`）。
 ///
 /// 不含字母数字的 token（标点、符号）既进不了 unicode61 索引，也不该出现在
 /// `matched_terms` 里——前端拿到一个 `"，"` 会把全文每个逗号刷成高亮。
@@ -78,8 +95,40 @@ pub fn searchable_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 单字中文虚词表。
+///
+/// **这是高亮降噪，不是检索规则。** 表里的词照常参与 MATCH 表达式的构造
+/// （`query::literal_match` 走的是 `searchable_tokens`，不经过这里）——短语查询
+/// 必须保留完整词序列，否则「知识的图谱」会退化成「知识图谱」，邻接语义就变了。
+/// 这张表只作用于返回给前端做高亮的 `matched_terms`：查「知识的图谱」时把「的」
+/// 交出去，前端会把摘要里每一个「的」都刷成高亮，视觉上一片脏。
+///
+/// 只收单字中文。单字英文（`a`、`I`）不进表：中文笔记里它们没有同样的噪音密度，
+/// 而且纯英文的单字查询本就罕见，滤掉的损失大于收益。
+/// 多字词一律不进表——「的确」「在于」是实词，误伤它们比放过一个「的」糟得多。
+const HIGHLIGHT_STOP_WORDS: &[&str] = &[
+    "的", "地", "得", "了", "着", "过", "是", "在", "有", "和", "与", "及", "等", "就", "都", "也",
+    "很", "之", "其", "而", "或", "但", "又", "还", "更", "被", "把", "从", "对", "为", "以", "于",
+    "由", "向", "个", "些", "吗", "呢", "吧", "啊", "呀",
+];
+
+/// 供 `matched_terms` 使用的高亮词：可检索 token 再滤掉单字中文虚词。
+///
+/// 与 `searchable_tokens` 的差异是刻意的，且只朝一个方向偏——高亮词是它的子集，
+/// 因此「每一项都必须是原文里真实存在的子串」这条契约不会被破坏。
+/// 全是虚词的查询（用户就搜了个「的」）返回空 Vec：前端拿到空数组会整段不高亮，
+/// 这个行为已有定义，比刷亮全文诚实。
+pub fn highlight_terms(query: &str) -> Vec<String> {
+    searchable_tokens(query)
+        .into_iter()
+        .filter(|token| !HIGHLIGHT_STOP_WORDS.contains(&token.as_str()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -127,6 +176,28 @@ mod tests {
             segment_tokens("第一段讲知识\n图谱是第二段"),
             vec!["第一段", "讲", "知识", "图谱", "是", "第二段"]
         );
+    }
+
+    #[test]
+    fn line_tokens_groups_by_line() {
+        assert_eq!(
+            line_tokens("第一段讲知识\n图谱是第二段"),
+            vec![vec!["第一段", "讲", "知识"], vec!["图谱", "是", "第二段"]]
+        );
+    }
+
+    #[test]
+    fn line_tokens_drops_lines_that_yield_nothing() {
+        // 空行、纯空白行不产生空组——下游据此决定要不要插分隔符，
+        // 留下空组会让拼音列凭空多出一个分隔符。
+        assert_eq!(line_tokens("甲\n\n   \n乙"), vec![vec!["甲"], vec!["乙"]]);
+        assert!(line_tokens("").is_empty());
+        assert!(line_tokens("\n\n").is_empty());
+    }
+
+    #[test]
+    fn line_tokens_of_single_line_is_one_group() {
+        assert_eq!(line_tokens("知识图谱"), vec![vec!["知识", "图谱"]]);
     }
 
     #[test]
@@ -182,6 +253,56 @@ mod tests {
     #[test]
     fn searchable_tokens_drops_punctuation() {
         assert_eq!(searchable_tokens("北京，天安门"), vec!["北京", "天安门"]);
+    }
+
+    #[test]
+    fn highlight_terms_drop_single_char_function_words() {
+        assert_eq!(highlight_terms("知识的图谱"), vec!["知识", "图谱"]);
+        assert_eq!(highlight_terms("在北京"), vec!["北京"]);
+    }
+
+    #[test]
+    fn highlight_terms_keep_multi_char_words_that_start_with_a_stop_word() {
+        // 只滤单字，「的确」「是否」这类实词不能被误伤。
+        assert_eq!(highlight_terms("的确"), vec!["的确"]);
+        assert_eq!(highlight_terms("在于"), vec!["在于"]);
+    }
+
+    #[test]
+    fn highlight_terms_keep_single_latin_characters() {
+        // 单字英文没有同样的噪音问题，不在过滤范围内。
+        assert_eq!(highlight_terms("a b c"), vec!["a", "b", "c"]);
+        assert_eq!(highlight_terms("维生素 c"), vec!["维生素", "c"]);
+    }
+
+    #[test]
+    fn highlight_terms_can_be_empty_when_the_query_is_all_function_words() {
+        assert!(highlight_terms("的").is_empty());
+        assert!(highlight_terms("的了").is_empty());
+    }
+
+    #[test]
+    fn highlight_terms_still_drop_punctuation_and_the_sentinel() {
+        // 降噪叠在 searchable_tokens 之上，原有的两条契约一条都不能松。
+        assert_eq!(highlight_terms("北京，天安门"), vec!["北京", "天安门"]);
+        assert!(highlight_terms(LINE_SENTINEL).is_empty());
+    }
+
+    #[test]
+    fn the_stop_word_table_holds_only_single_chinese_characters() {
+        // 表里一旦混进多字词或 ASCII，过滤范围就会悄悄扩大到实词与英文。
+        for word in HIGHLIGHT_STOP_WORDS {
+            let mut chars = word.chars();
+            let first = chars.next().expect("虚词表里有空串");
+            assert!(chars.next().is_none(), "虚词表里有多字词: {word}");
+            assert!(!first.is_ascii(), "虚词表里有 ASCII 字符: {word}");
+        }
+    }
+
+    #[test]
+    fn the_stop_word_table_has_no_duplicates() {
+        let unique: HashSet<&&str> = HIGHLIGHT_STOP_WORDS.iter().collect();
+        assert_eq!(unique.len(), HIGHLIGHT_STOP_WORDS.len(), "虚词表有重复项");
     }
 
     /// 哨兵能隔断短语，前提是 unicode61 把它当成一个真 token 收进索引。

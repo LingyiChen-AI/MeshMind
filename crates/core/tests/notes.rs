@@ -258,3 +258,363 @@ fn restore_brings_back_note_and_index() {
         .unwrap();
     assert_eq!(index_rows, 1, "恢复后索引行必须重建");
 }
+
+// ------------------------------------------------------------------- 硬删除
+
+/// 播一条带标签和附件的笔记并软删除，返回 (note_id, attachment_id)。
+fn seed_deleted_with_relations(
+    conn: &mut rusqlite::Connection,
+    dir: &std::path::Path,
+    bytes: &[u8],
+) -> (i64, i64) {
+    let file = meshmind_core::attachments::store(conn, dir, bytes, "png", 500).unwrap();
+    let note = notes::create(
+        conn,
+        &NewNote {
+            body_json: doc("知识图谱 #论文"),
+            attachment_ids: vec![file.id],
+        },
+        1_000,
+    )
+    .unwrap();
+    notes::soft_delete(conn, note.id, 2_000).unwrap();
+    (note.id, file.id)
+}
+
+fn count(conn: &rusqlite::Connection, sql: &str, id: i64) -> i64 {
+    conn.query_row(sql, [id], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn purge_removes_the_note_with_all_of_its_relations_and_index_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = test_conn();
+    let (note_id, attachment_id) = seed_deleted_with_relations(&mut conn, dir.path(), TINY_PNG);
+
+    notes::purge(&mut conn, note_id).unwrap();
+
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM notes WHERE id = ?1", note_id),
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM note_tags WHERE note_id = ?1",
+            note_id
+        ),
+        0,
+        "标签关联必须一并清掉"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM note_attachments WHERE note_id = ?1",
+            note_id
+        ),
+        0,
+        "附件关联必须一并清掉"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM notes_fts WHERE rowid = ?1",
+            note_id
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM notes_py WHERE rowid = ?1",
+            note_id
+        ),
+        0
+    );
+    // 回收站里也不该再有它。
+    assert!(notes::list_deleted(&conn, 10, 0).unwrap().is_empty());
+
+    // 附件本身还在，只是变成零引用了——真正的删文件交给下一轮 GC。
+    assert!(
+        meshmind_core::attachments::get(&conn, attachment_id)
+            .unwrap()
+            .is_some(),
+        "purge 不负责删附件，只负责让它变成零引用"
+    );
+}
+
+#[test]
+fn purged_attachment_becomes_collectable_by_the_next_gc() {
+    // purge 与 GC 的衔接：purge 摘掉最后一条引用，附件在下一轮
+    // 过了宽限期的 GC 里才真正落盘删除。
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = test_conn();
+    let (note_id, attachment_id) = seed_deleted_with_relations(&mut conn, dir.path(), TINY_PNG);
+
+    // purge 之前它有引用，GC 碰不得它。
+    let collected =
+        meshmind_core::attachments::collect_garbage_with_grace(&conn, dir.path(), 10_000_000, 0)
+            .unwrap();
+    assert_eq!(collected, 0, "还被笔记引用着的附件不该被回收");
+
+    notes::purge(&mut conn, note_id).unwrap();
+
+    let collected =
+        meshmind_core::attachments::collect_garbage_with_grace(&conn, dir.path(), 10_000_000, 0)
+            .unwrap();
+    assert_eq!(collected, 1, "purge 后附件应变成零引用并被回收");
+    assert!(
+        meshmind_core::attachments::get(&conn, attachment_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn purge_rejects_a_live_note() {
+    let mut conn = test_conn();
+    let note = notes::create(&mut conn, &new("还活着"), 1_000).unwrap();
+
+    let err = notes::purge(&mut conn, note.id).unwrap_err();
+
+    assert!(
+        matches!(err, CoreError::NoteNotDeleted(id) if id == note.id),
+        "硬删一条活着的笔记应当报错: {err:?}"
+    );
+    // 报错之后笔记必须原封不动。
+    assert_eq!(notes::get(&conn, note.id).unwrap().title, "还活着");
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM notes_fts WHERE rowid = ?1",
+            note.id
+        ),
+        1,
+        "被拒绝的 purge 不该动索引"
+    );
+}
+
+#[test]
+fn purge_reports_a_missing_note() {
+    let mut conn = test_conn();
+    let err = notes::purge(&mut conn, 999).unwrap_err();
+    assert!(matches!(err, CoreError::NoteNotFound(999)), "{err:?}");
+}
+
+#[test]
+fn purge_all_deleted_empties_the_trash_and_leaves_live_notes_alone() {
+    let mut conn = test_conn();
+    let live_a = notes::create(&mut conn, &new("活着的甲"), 1_000).unwrap();
+    let trashed_a = notes::create(&mut conn, &new("回收站的甲"), 1_100).unwrap();
+    let trashed_b = notes::create(&mut conn, &new("回收站的乙 #论文"), 1_200).unwrap();
+    let live_b = notes::create(&mut conn, &new("活着的乙"), 1_300).unwrap();
+    notes::soft_delete(&mut conn, trashed_a.id, 2_000).unwrap();
+    notes::soft_delete(&mut conn, trashed_b.id, 2_100).unwrap();
+
+    let purged = notes::purge_all_deleted(&mut conn).unwrap();
+
+    assert_eq!(purged, 2, "返回的条数必须是真正删掉的软删笔记数");
+    assert!(notes::list_deleted(&conn, 10, 0).unwrap().is_empty());
+    for id in [trashed_a.id, trashed_b.id] {
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM notes WHERE id = ?1", id),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM note_tags WHERE note_id = ?1",
+                id
+            ),
+            0
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM notes_fts WHERE rowid = ?1", id),
+            0
+        );
+    }
+
+    // 活着的笔记连同索引一根毫毛都不能少。
+    let live = notes::list(&conn, 10, 0).unwrap();
+    assert_eq!(
+        live.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![live_b.id, live_a.id]
+    );
+    for id in [live_a.id, live_b.id] {
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM notes_fts WHERE rowid = ?1", id),
+            1,
+            "活着的笔记索引不该被清空回收站波及"
+        );
+    }
+}
+
+#[test]
+fn purge_all_deleted_on_an_empty_trash_is_a_no_op() {
+    let mut conn = test_conn();
+    notes::create(&mut conn, &new("活着"), 1_000).unwrap();
+
+    assert_eq!(notes::purge_all_deleted(&mut conn).unwrap(), 0);
+    assert_eq!(notes::list(&conn, 10, 0).unwrap().len(), 1);
+}
+
+// --------------------------------------------------------------- 按标签查询
+
+/// 播一条笔记并返回 id，正文即入参（标签写在正文里由 parse_tags 解析）。
+fn seed(conn: &mut rusqlite::Connection, text: &str, now: i64) -> i64 {
+    notes::create(conn, &new(text), now).unwrap().id
+}
+
+#[test]
+fn list_by_tag_returns_only_notes_carrying_that_tag() {
+    let mut conn = test_conn();
+    let a = seed(&mut conn, "甲 #论文", 1_000);
+    seed(&mut conn, "乙 #随笔", 1_100);
+    let c = seed(&mut conn, "丙 #论文 #随笔", 1_200);
+
+    let hits = notes::list_by_tag(&conn, "论文", 10, 0).unwrap();
+
+    // updated_at 倒序。
+    assert_eq!(hits.iter().map(|n| n.id).collect::<Vec<_>>(), vec![c, a]);
+    // 每条都带上自己的全部标签，和 list 的语义一致。
+    assert_eq!(hits[0].tags, vec!["论文".to_string(), "随笔".to_string()]);
+    assert_eq!(hits[1].tags, vec!["论文".to_string()]);
+}
+
+#[test]
+fn list_by_tag_excludes_soft_deleted_notes() {
+    let mut conn = test_conn();
+    let live = seed(&mut conn, "活着 #论文", 1_000);
+    let trashed = seed(&mut conn, "回收站 #论文", 1_100);
+    notes::soft_delete(&mut conn, trashed, 2_000).unwrap();
+
+    let hits = notes::list_by_tag(&conn, "论文", 10, 0).unwrap();
+
+    assert_eq!(hits.iter().map(|n| n.id).collect::<Vec<_>>(), vec![live]);
+}
+
+#[test]
+fn list_by_tag_respects_limit_and_offset() {
+    let mut conn = test_conn();
+    let ids: Vec<i64> = (0..5)
+        .map(|i| seed(&mut conn, &format!("第{i}条 #论文"), 1_000 + i))
+        .collect();
+
+    let page_one = notes::list_by_tag(&conn, "论文", 2, 0).unwrap();
+    let page_two = notes::list_by_tag(&conn, "论文", 2, 2).unwrap();
+    let page_three = notes::list_by_tag(&conn, "论文", 2, 4).unwrap();
+
+    assert_eq!(
+        page_one.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![ids[4], ids[3]]
+    );
+    assert_eq!(
+        page_two.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![ids[2], ids[1]]
+    );
+    assert_eq!(
+        page_three.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+}
+
+#[test]
+fn list_by_tag_returns_empty_for_an_unknown_tag() {
+    let mut conn = test_conn();
+    seed(&mut conn, "甲 #论文", 1_000);
+    assert!(
+        notes::list_by_tag(&conn, "不存在的标签", 10, 0)
+            .unwrap()
+            .is_empty()
+    );
+    // 标签匹配是精确相等，不是前缀也不是子串。
+    assert!(notes::list_by_tag(&conn, "论", 10, 0).unwrap().is_empty());
+    assert!(
+        notes::list_by_tag(&conn, "论文集", 10, 0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn list_by_tag_matches_the_lowercased_form_stored_in_the_database() {
+    // 标签入库时统一小写，调用方传进来的也该是小写——这是文档注释写明的前提。
+    let mut conn = test_conn();
+    let id = seed(&mut conn, "甲 #Rust", 1_000);
+    assert_eq!(
+        notes::list_by_tag(&conn, "rust", 10, 0)
+            .unwrap()
+            .iter()
+            .map(|n| n.id)
+            .collect::<Vec<_>>(),
+        vec![id]
+    );
+    assert!(notes::list_by_tag(&conn, "Rust", 10, 0).unwrap().is_empty());
+}
+
+#[test]
+fn all_with_counts_sorts_by_count_then_name() {
+    use meshmind_core::notes::tags::TagCount;
+
+    let mut conn = test_conn();
+    seed(&mut conn, "甲 #论文 #rust #zig", 1_000);
+    seed(&mut conn, "乙 #论文 #rust", 1_100);
+    seed(&mut conn, "丙 #论文", 1_200);
+
+    let counts = notes::tags::all_with_counts(&conn).unwrap();
+
+    assert_eq!(
+        counts,
+        vec![
+            TagCount {
+                name: "论文".into(),
+                count: 3
+            },
+            TagCount {
+                name: "rust".into(),
+                count: 2
+            },
+            // 同为 1 时按名称升序：zig 是这一档里唯一一个。
+            TagCount {
+                name: "zig".into(),
+                count: 1
+            },
+        ]
+    );
+}
+
+#[test]
+fn all_with_counts_breaks_ties_by_name_ascending() {
+    let mut conn = test_conn();
+    seed(&mut conn, "甲 #c #b #a", 1_000);
+
+    let counts = notes::tags::all_with_counts(&conn).unwrap();
+
+    assert_eq!(
+        counts.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b", "c"],
+        "同数量必须按名称升序，输出才稳定"
+    );
+    assert!(counts.iter().all(|t| t.count == 1));
+}
+
+#[test]
+fn all_with_counts_ignores_soft_deleted_notes() {
+    let mut conn = test_conn();
+    seed(&mut conn, "甲 #论文", 1_000);
+    let trashed = seed(&mut conn, "乙 #论文 #随笔", 1_100);
+    notes::soft_delete(&mut conn, trashed, 2_000).unwrap();
+
+    let counts = notes::tags::all_with_counts(&conn).unwrap();
+
+    assert_eq!(counts.len(), 1, "只剩活笔记上的标签: {counts:?}");
+    assert_eq!(counts[0].name, "论文");
+    assert_eq!(counts[0].count, 1, "软删笔记不该计入");
+}
+
+#[test]
+fn all_with_counts_is_empty_when_nothing_is_tagged() {
+    let mut conn = test_conn();
+    seed(&mut conn, "没有标签的笔记", 1_000);
+    assert!(notes::tags::all_with_counts(&conn).unwrap().is_empty());
+}
