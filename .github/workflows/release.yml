@@ -1,0 +1,81 @@
+name: Release
+
+# 打 tag 触发。tag 名必须与 package.json 的 version 一致（v0.1.0 ↔ 0.1.0），
+# 否则 latest.json 里的版本号和 Release 的 tag 对不上，
+# 客户端要么永远收不到更新，要么反复提示同一个版本。
+#
+# 版本号只有 package.json 一处：tauri.conf.json 的 version 写的是
+# "../package.json"，src-tauri/Cargo.toml 的 version 是 crate 版本、不参与应用版本。
+# 发版流程：改 package.json 的 version → 提交 → 打同名 tag → push tag。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: ${{ matrix.os }}
+    strategy:
+      # 一个平台失败不影响另一个平台把产物传完。两边的产物进的是同一个草稿 Release，
+      # 缺哪个平台一眼就能从附件列表里看出来。
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            # 只出 Apple Silicon 包。--bundles app,dmg 里的 app 不是多余的：
+            # macOS 的更新包 .app.tar.gz 由 .app 打出来，不打 app 就没有更新产物。
+            args: '--target aarch64-apple-darwin --bundles app,dmg'
+          - os: windows-latest
+            # msi 自带更新能力（更新器直接下载 .msi.zip），不需要额外的 app 目标。
+            args: '--bundles msi'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      # tauri-action 要建 Release 并往上传附件
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 必须在 setup-node 之前，否则 setup-node 的 pnpm 缓存找不到 pnpm 可执行文件
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 打包并发布
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 更新包的 minisign 签名密钥。与 Apple 代码签名无关，不需要开发者账号。
+          # 两个 secret 缺一不可：缺了就不出 .sig 文件，而没有 .sig 的更新包
+          # 客户端会当作校验失败直接拒绝安装——症状是「有更新、但装不上」。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'MeshMind ${{ github.ref_name }}'
+          releaseBody: '安装包见下方附件。macOS 版本未做代码签名，首次打开需右键点图标选「打开」。'
+          # 刻意建成草稿：两个平台的 job 往同一个 Release 里追加产物，
+          # 自动发布会出现「Windows 包还没传上去，Release 已经公开」的窗口。
+          # 两边都传完之后人工 `gh release edit <tag> --draft=false` 放出去。
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
