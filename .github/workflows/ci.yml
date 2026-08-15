@@ -81,6 +81,27 @@ jobs:
       - name: 前端类型检查与构建
         run: pnpm build
 
+      # 只装 chromium。真实运行环境是 WKWebView(macOS) / WebView2(Windows)，
+      # 两者都不是 Chromium 但都是现代引擎；再装 firefox/webkit 不会更接近真实，
+      # 只会让 CI 慢一倍。--with-deps 在 Windows / macOS 上是空操作，
+      # 但留着，将来加 Linux runner 时就不用回来改这一行。
+      - name: 安装 Playwright 浏览器
+        run: pnpm exec playwright install --with-deps chromium
+
+      # 交互测试跑的是 vite dev server + 假 IPC，不需要 Rust 外壳，
+      # 所以放在 cargo 那几步之前——它比 cargo test 快得多，坏了能更早知道。
+      - name: 交互测试
+        run: pnpm e2e
+
+      - name: 上传失败时的 trace
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
       # --locked：Cargo.lock 与 manifest 不一致时立刻失败，
       # 而不是让 CI 悄悄改 lockfile 后照样通过（本项目踩过一次 lockfile 未提交）。
       - name: Rust 测试
