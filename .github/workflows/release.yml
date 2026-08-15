@@ -1,5 +1,15 @@
 name: Release
 
+# ⚠ 发第一版之前还差三件事，缺任何一件都会出一个「装得上但永远收不到更新」的包：
+#
+#   1. `src-tauri/tauri.conf.json` 补上 `plugins.updater`（endpoints + pubkey）
+#      与 `bundle.createUpdaterArtifacts: true`（见 src-tauri/src/main.rs 的注释）。
+#      少了这两处，产物里不会有 latest.json，也不会有任何 .sig。
+#   2. 仓库里设好 TAURI_SIGNING_PRIVATE_KEY 与 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#      两个 secret。少了它们更新包不带签名，客户端会当作校验失败直接拒绝安装。
+#   3. 确认 `gh release view <tag>` 里同时有 .dmg / .app.tar.gz / .app.tar.gz.sig
+#      与 .msi / .msi.zip / .msi.zip.sig，以及 latest.json。
+#
 # 打 tag 触发。tag 名必须与 package.json 的 version 一致（v0.1.0 ↔ 0.1.0），
 # 否则 latest.json 里的版本号和 Release 的 tag 对不上，
 # 客户端要么永远收不到更新，要么反复提示同一个版本。

@@ -34,9 +34,10 @@ jobs:
             # 但 msi 只能在 Windows 上打，dmg 只能在 macOS 上打（无法交叉构建），
             # 所以这里按平台显式指定 --bundles，避免撞上不支持的目标。
             #
-            # macOS 上必须带 app：更新包（.app.tar.gz）是从 .app 打出来的，
-            # 只打 dmg 的话 createUpdaterArtifacts 会退化成一句 warning、
-            # 一个更新产物都不出——而那正是发版时才会发现的失败。
+            # macOS 上带 app 是为更新器留的：更新包 .app.tar.gz 只能从 .app 打出来，
+            # 只打 dmg 的话 bundle.createUpdaterArtifacts 会退化成一句 warning、
+            # 一个更新产物都不出。那个开关要等公钥就位才能打开（见 main.rs 的注释），
+            # 但 app 目标现在就加上，免得到时候还要回来改 CI。
             bundles: app,dmg
           - os: windows-latest
             bundles: msi
