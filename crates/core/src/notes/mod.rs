@@ -105,8 +105,24 @@ fn delete_index(tx: &Transaction, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// 关联附件。插入前先校验附件确实存在。
+///
+/// 不能只靠外键：`note_attachments.attachment_id` 的外键失败会让整个事务回滚，
+/// 而 `INSERT OR IGNORE` 对外键约束不生效（SQLite 文档："The ON CONFLICT algorithm
+/// does not apply to FOREIGN KEY constraints"）。裸的外键错误冒到界面上是
+/// 「数据库错误: FOREIGN KEY constraint failed」，用户完全不知道发生了什么；
+/// 先查一次给出 [`CoreError::AttachmentNotFound`]，至少说清是图没了。
+/// （附件为什么会没：见 `attachments::collect_garbage_with_grace` 的宽限期说明。）
 fn link_attachments(tx: &Transaction, note_id: i64, attachment_ids: &[i64]) -> Result<()> {
     for attachment_id in attachment_ids {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attachments WHERE id = ?1)",
+            params![attachment_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(CoreError::AttachmentNotFound(*attachment_id));
+        }
         tx.execute(
             "INSERT OR IGNORE INTO note_attachments (note_id, attachment_id) VALUES (?1, ?2)",
             params![note_id, attachment_id],

@@ -1,5 +1,6 @@
 mod common;
 
+use meshmind_core::CoreError;
 use meshmind_core::notes::{self, NewNote};
 
 use common::{TINY_PNG, doc, test_conn};
@@ -89,7 +90,11 @@ fn rolls_back_entirely_when_attachment_is_missing() {
         1_000,
     );
 
-    assert!(result.is_err());
+    // 裸的 FOREIGN KEY constraint failed 对用户毫无意义，必须是具名错误。
+    assert!(
+        matches!(result, Err(CoreError::AttachmentNotFound(999))),
+        "应返回 AttachmentNotFound(999)，实际: {result:?}"
+    );
     let rows: i64 = conn
         .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
         .unwrap();
@@ -98,6 +103,31 @@ fn rolls_back_entirely_when_attachment_is_missing() {
         .query_row("SELECT count(*) FROM notes_fts", [], |r| r.get(0))
         .unwrap();
     assert_eq!(index_rows, 0, "事务失败后不应残留索引行");
+    let py_rows: i64 = conn
+        .query_row("SELECT count(*) FROM notes_py", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(py_rows, 0, "事务失败后不应残留拼音索引行");
+    let link_rows: i64 = conn
+        .query_row("SELECT count(*) FROM note_attachments", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(link_rows, 0, "事务失败后不应残留附件关联行");
+}
+
+/// 更新走的是同一条 link_attachments 路径，错误也必须同样可读，且不能改坏原有笔记。
+#[test]
+fn update_rejects_missing_attachment_without_touching_the_note() {
+    let mut conn = test_conn();
+    let note = notes::create(&mut conn, &new("原始内容"), 1_000).unwrap();
+
+    let result = notes::update(&mut conn, note.id, &doc("改写后的内容"), &[999], 2_000);
+
+    assert!(
+        matches!(result, Err(CoreError::AttachmentNotFound(999))),
+        "应返回 AttachmentNotFound(999)，实际: {result:?}"
+    );
+    let reloaded = notes::get(&conn, note.id).unwrap();
+    assert_eq!(reloaded.title, "原始内容", "失败的更新不应改动笔记");
+    assert_eq!(reloaded.updated_at, 1_000);
 }
 
 #[test]
