@@ -32,9 +32,12 @@ import type { MockInit } from './state'
 /// - `window.js`：`metadata.currentWindow.label`（`getCurrentWindow()` 读它）
 /// - `event.js` 的 `_unlisten` 会先调
 ///   **`window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId)`**，
-///   再 invoke `plugin:event|unlisten`。这个全局对象不摆出来的话，任何一次
-///   unlisten 都会 TypeError——而 React StrictMode 一挂载就会 listen/unlisten 一轮，
-///   所以是必现的白屏，不是边角情况。
+///   再 invoke `plugin:event|unlisten`。这个全局对象不摆出来的话，`_unlisten`
+///   会在第一行就 TypeError，后面那句 invoke 根本到不了——于是监听器永远摘不掉。
+///   React StrictMode 一挂载就会 listen / unlisten / listen 一轮，泄漏是必现的，
+///   后果是每个事件被投递两次（实测：`app-quit-requested` 让 `confirm_quit`
+///   被调用 2 次而不是 1 次）。页面不会白屏，所以这个坑只会以「时序测试莫名其妙
+///   数字翻倍」的形式暴露出来。
 export function installMock(init: MockInit): void {
   interface Call {
     cmd: string
