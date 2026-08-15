@@ -81,11 +81,13 @@ jobs:
       - name: 前端类型检查与构建
         run: pnpm build
 
+      # --locked：Cargo.lock 与 manifest 不一致时立刻失败，
+      # 而不是让 CI 悄悄改 lockfile 后照样通过（本项目踩过一次 lockfile 未提交）。
       - name: Rust 测试
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Clippy（warning 视为错误）
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: 格式检查
         run: cargo fmt --all -- --check
