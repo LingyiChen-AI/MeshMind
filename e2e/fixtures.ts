@@ -12,6 +12,23 @@ import { initialState, type MockInit, type MockSearchHit } from './mock/state'
 export interface IpcCall {
   cmd: string
   args: Record<string, unknown>
+  /// invoke 进来的时刻（页面内的 performance.now()）
+  startedAt: number
+  /// 结果落地的时刻，还在途中则是 null
+  settledAt: number | null
+}
+
+/// 有没有两次调用在时间上重叠。`overlaps(await mock.callsTo('update_note'))`
+/// 就是「同一条笔记被并发写了」的直接证据——串行化生效时它必须是 false。
+export function overlaps(calls: IpcCall[]): boolean {
+  const sorted = [...calls].sort((a, b) => a.startedAt - b.startedAt)
+  for (let i = 1; i < sorted.length; i += 1) {
+    const previous = sorted[i - 1] as IpcCall
+    const current = sorted[i] as IpcCall
+    // 上一次还没落地（settledAt 为 null 视作「至今仍在途」）就又发了一次
+    if (previous.settledAt === null || previous.settledAt > current.startedAt) return true
+  }
+  return false
 }
 
 interface MockBridge {
@@ -113,6 +130,17 @@ export async function openApp(page: Page, overrides: Partial<MockInit> = {}): Pr
   // 等 React 挂完再交回去：否则第一条断言可能撞在空的 #root 上。
   await page.waitForSelector('.app, .capture')
   return handleFor(page)
+}
+
+/// 把光标放进编辑器正文并追加文字。
+///
+/// 点 `.editor p` 而不是整个 contenteditable：正文里有图片这类 atom 节点时，
+/// 点在编辑区中央有可能选中那个节点，接着一打字就把图片替换掉了——
+/// 而「正文里的附件有没有被一起存回去」正是这一组测试要守的东西。
+export async function typeInEditor(page: Page, text: string, paragraph = 0) {
+  await page.locator('.editor p').nth(paragraph).click()
+  await page.keyboard.press('End')
+  await page.keyboard.type(text)
 }
 
 /// 手动往事件通道上打一个事件，冒充外壳（托盘点「退出」时 emit 的

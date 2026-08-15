@@ -42,6 +42,11 @@ export function installMock(init: MockInit): void {
   interface Call {
     cmd: string
     args: Record<string, unknown>
+    /// invoke 进来的时刻（performance.now()）
+    startedAt: number
+    /// 结果落地的时刻。还在途中时是 null——两个字段一起就能回答
+    /// 「有没有两次调用在时间上重叠」，也就是串行化到底生没生效。
+    settledAt: number | null
   }
 
   interface Note {
@@ -85,7 +90,7 @@ export function installMock(init: MockInit): void {
   const w = window as unknown as Record<string, unknown>
 
   w.__IPC_MOCK__ = {
-    calls: () => state.calls.map((c) => ({ cmd: c.cmd, args: c.args })),
+    calls: () => state.calls.map((c) => ({ ...c })),
     reset: () => {
       state.calls.length = 0
     },
@@ -489,18 +494,25 @@ export function installMock(init: MockInit): void {
     },
     async invoke(cmd: string, args: Record<string, unknown> = {}) {
       const recorded = args ?? {}
-      state.calls.push({
+      const call: Call = {
         cmd,
         // 深拷一份：调用方（比如 TipTap 的正文对象）之后还会继续变，
         // 存引用的话断言拿到的是「测试跑完那一刻的样子」而不是「调用当时的样子」。
         args: JSON.parse(JSON.stringify(recorded)) as Record<string, unknown>,
-      })
-      const delay = state.delays[cmd]
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
-      const failure = state.failCommands[cmd]
-      // 裸字符串，不是 Error：真实 CommandError 就是这么序列化的。
-      if (failure) throw failure
-      return handle(cmd, recorded)
+        startedAt: performance.now(),
+        settledAt: null,
+      }
+      state.calls.push(call)
+      try {
+        const delay = state.delays[cmd]
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+        const failure = state.failCommands[cmd]
+        // 裸字符串，不是 Error：真实 CommandError 就是这么序列化的。
+        if (failure) throw failure
+        return handle(cmd, recorded)
+      } finally {
+        call.settledAt = performance.now()
+      }
     },
   }
 }
