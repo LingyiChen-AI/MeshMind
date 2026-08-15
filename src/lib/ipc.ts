@@ -162,4 +162,16 @@ export const ipc = {
   collectGarbage(): Promise<number> {
     return call<number>('collect_garbage')
   },
+
+  /**
+   * 让快捕窗口收起自己。
+   *
+   * 不能用 `getCurrentWindow().hide()`：那条路要 `core:window:allow-hide` 权限，
+   * 而 capabilities 里给的 `core:window:default` 是纯只读集合、不含它，
+   * invoke 会被 ACL 直接拒掉——症状是笔记存进去了，窗口却赖在屏幕上。
+   * 走命令层则只依赖 Rust 侧的窗口句柄，与前端权限无关。
+   */
+  hideCaptureWindow(): Promise<void> {
+    return call<void>('hide_capture_window')
+  },
 }

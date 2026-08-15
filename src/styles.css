@@ -56,7 +56,7 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
@@ -99,7 +99,75 @@ button.primary:hover {
 
 .sidebar-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+
+/* ---------- 标签筛选条 ---------- */
+/* 标签一多就会把笔记列表挤出视野，所以封顶高度、超出部分自己滚。 */
+.tag-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px;
+  max-height: 84px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+  border-radius: 10px;
+}
+
+.tag-chip.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tag-chip-count {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* ---------- 侧边栏底部（救急功能，刻意不显眼） ---------- */
+.sidebar-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+}
+
+button.subtle {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+button.subtle:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.sidebar-notice {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .workspace {

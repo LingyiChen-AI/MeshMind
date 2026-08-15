@@ -7,7 +7,7 @@ import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { collectAttachmentIds, isEmptyDoc } from './components/doc'
+import { collectAttachmentIds, isEmptyDoc } from './lib/doc'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { ipc } from './lib/ipc'
 import { keys } from './lib/platform'
@@ -24,10 +24,21 @@ export function Capture() {
   const savingRef = useRef(saving)
   savingRef.current = saving
 
+  // 收起窗口。主路径走 Rust 命令：前端直接 hide() 需要 `core:window:allow-hide`，
+  // 而 capabilities 里的 `core:window:default` 是只读集合、不含它，会被 ACL 拒掉。
+  // 命令不可用时（旧版外壳）再退回直接 hide——两条都失败才算真的收不起来，
+  // 那时必须告诉用户，否则窗口赖在屏幕上而界面上毫无解释。
   const hide = useCallback(() => {
-    getCurrentWindow()
-      .hide()
-      .catch((err: unknown) => console.error('[capture] 隐藏窗口失败', err))
+    ipc
+      .hideCaptureWindow()
+      .catch(async (err: unknown) => {
+        console.error('[capture] hide_capture_window 失败，回退直接 hide', err)
+        await getCurrentWindow().hide()
+      })
+      .catch((err: unknown) => {
+        console.error('[capture] 隐藏窗口失败', err)
+        setError(`窗口收不起来：${String(err)}`)
+      })
   }, [])
 
   const save = useCallback(async () => {
@@ -91,7 +102,9 @@ export function Capture() {
   return (
     <div className="capture">
       <div className="capture-body">
-        <Editor bodyJson={body} onChange={setBody} autoFocus />
+        {/* 粘贴失败必须走界面：快捕窗口本来就只有一个编辑区，
+            用户看不到 console，静默失败等于「⌘V 没反应」。 */}
+        <Editor bodyJson={body} onChange={setBody} onError={setError} autoFocus />
       </div>
       {error ? (
         <div className="error-bar" role="alert" onClick={() => setError(null)}>

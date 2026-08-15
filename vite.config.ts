@@ -8,5 +8,9 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   build: { target: 'es2021' },
-  test: { environment: 'node', include: ['src/**/*.test.ts'] },
+  // 测试的都是纯函数（正文 JSON 解析、拼音高亮、命名转换），不碰 DOM，
+  // 所以 environment 留在 node——引 jsdom 只会拖慢启动。
+  // 但 include 必须同时收 .tsx：collectAttachmentIds 这类函数曾经就住在 .tsx 里，
+  // 只收 .ts 等于让它们悄悄零覆盖。
+  test: { environment: 'node', include: ['src/**/*.test.{ts,tsx}'] },
 })

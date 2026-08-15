@@ -44,13 +44,21 @@ export interface EditorProps {
   bodyJson: string
   onChange: (bodyJson: string) => void
   autoFocus?: boolean
+  /**
+   * 粘贴图片失败时的回调（磁盘满、附件目录不可写、剪贴板项读不出来）。
+   * 编辑器自己没有展示错误的地方，必须交给上层——不接的话用户按 ⌘V
+   * 界面上什么都不会发生，只会反复粘贴然后以为应用坏了。
+   */
+  onError?: (message: string) => void
 }
 
-export function Editor({ bodyJson, onChange, autoFocus }: EditorProps) {
-  // onChange 每次渲染都可能是新函数，但编辑器实例只该创建一次：
-  // 用 ref 中转，避免把 onChange 塞进 useEditor 的依赖里导致编辑器反复重建。
+export function Editor({ bodyJson, onChange, autoFocus, onError }: EditorProps) {
+  // onChange / onError 每次渲染都可能是新函数，但编辑器实例只该创建一次：
+  // 用 ref 中转，避免把它们塞进 useEditor 的依赖里导致编辑器反复重建。
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+  const onErrorRef = useRef(onError)
+  onErrorRef.current = onError
 
   const editor = useEditor({
     extensions: [StarterKit, AttachmentImage],
@@ -68,7 +76,13 @@ export function Editor({ bodyJson, onChange, autoFocus }: EditorProps) {
         // 所以异步部分只能 fire-and-forget，落地后再 dispatch 一个事务插节点。
         void extractPastedImage(event.clipboardData)
           .then(async (image) => {
-            if (!image) return
+            if (!image) {
+              // 上面判定过剪贴板里有图片项，这里却读不出字节——多半是
+              // getAsFile() 返回了 null。已经吞掉了默认粘贴行为，必须说一声，
+              // 否则就是一次静默的空操作。
+              onErrorRef.current?.('剪贴板里的图片读不出来，请重新复制后再试')
+              return
+            }
             const attachment = await ipc.storeAttachment(image.bytes, image.ext)
             if (view.isDestroyed) return
 
@@ -78,9 +92,10 @@ export function Editor({ bodyJson, onChange, autoFocus }: EditorProps) {
             view.dispatch(view.state.tr.replaceSelectionWith(node).scrollIntoView())
           })
           .catch((err: unknown) => {
-            // ipc / attachments 层 reject 的是字符串。至少要留下痕迹，
-            // 否则用户会看到「粘贴了但什么都没发生」。
+            // ipc / attachments 层 reject 的是字符串。console 只够开发者用，
+            // 用户看到的必须是界面上的提示——否则「粘贴了但什么都没发生」。
             console.error('[editor] 粘贴图片失败', err)
+            onErrorRef.current?.(`粘贴图片失败：${String(err)}`)
           })
 
         return true

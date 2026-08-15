@@ -1,4 +1,5 @@
 // 对正文 JSON 的两个只读判断，App 与 Capture 共用。
+// 纯数据函数，不含 JSX，所以住在 lib/ 而不是 components/。
 //
 // 为什么需要 collectAttachmentIds：`update_note` 是**全量替换** note_attachments 的
 // （crates/core/src/notes/mod.rs 里先 DELETE 再 link_attachments），
