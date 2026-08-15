@@ -43,8 +43,8 @@ pub struct NoteSummary {
 /// 创建笔记。notes、两张索引表、标签、附件关联在同一事务内写入，
 /// 任一环节失败则整体回滚，绝不留下有笔记没索引的中间态。
 pub fn create(conn: &mut Connection, new: &NewNote, now: i64) -> Result<Note> {
-    let doc: Value =
-        serde_json::from_str(&new.body_json).map_err(|e| CoreError::InvalidContent(e.to_string()))?;
+    let doc: Value = serde_json::from_str(&new.body_json)
+        .map_err(|e| CoreError::InvalidContent(e.to_string()))?;
     let body_text = tiptap::extract_text(&doc);
     let title = tiptap::derive_title(&body_text);
     let tag_names = tags::parse_tags(&body_text);
@@ -232,7 +232,10 @@ pub fn update(
     write_index(&tx, id, &title, &body_text)?;
     tx.execute("DELETE FROM note_tags WHERE note_id = ?1", params![id])?;
     tags::attach(&tx, id, &tag_names)?;
-    tx.execute("DELETE FROM note_attachments WHERE note_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM note_attachments WHERE note_id = ?1",
+        params![id],
+    )?;
     link_attachments(&tx, id, attachment_ids)?;
     tx.commit()?;
 

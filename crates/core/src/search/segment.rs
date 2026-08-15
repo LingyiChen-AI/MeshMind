@@ -45,7 +45,10 @@ mod tests {
     #[test]
     fn keeps_latin_words_as_tokens() {
         let tokens = segment_tokens("使用 Tauri 构建应用");
-        assert!(tokens.contains(&"Tauri".to_string()), "实际切分: {tokens:?}");
+        assert!(
+            tokens.contains(&"Tauri".to_string()),
+            "实际切分: {tokens:?}"
+        );
     }
 
     #[test]

@@ -26,7 +26,10 @@ pub fn parse_tags(body_text: &str) -> Vec<String> {
 /// 把标签写入 tags 并与笔记关联。已存在的标签复用同一行。
 pub fn attach(tx: &Transaction, note_id: i64, names: &[String]) -> Result<()> {
     for name in names {
-        tx.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![name])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+            params![name],
+        )?;
         let tag_id: i64 = tx.query_row(
             "SELECT id FROM tags WHERE name = ?1",
             params![name],

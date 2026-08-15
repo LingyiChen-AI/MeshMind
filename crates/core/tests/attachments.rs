@@ -17,7 +17,12 @@ fn stores_file_under_sharded_content_addressed_path() {
         .join(attachments::relative_path(&stored.sha256, "png"));
     assert!(path.exists(), "附件文件未落盘: {path:?}");
     assert_eq!(
-        path.parent().unwrap().file_name().unwrap().to_str().unwrap(),
+        path.parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
         &stored.sha256[0..2],
         "未按 hash 前两位分片"
     );
