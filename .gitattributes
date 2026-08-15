@@ -1,0 +1,10 @@
+# 仓库内一律 LF。Windows 检出时不做 CRLF 转换，
+# 避免 include_str! 的 SQL 与测试里的多行字面量在两平台上不一致。
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.png binary
+*.ico binary
+*.icns binary
+*.dmg binary
+*.msi binary
