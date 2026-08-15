@@ -96,8 +96,8 @@ attachments(
 note_attachments(note_id INTEGER, attachment_id INTEGER,
                  PRIMARY KEY(note_id, attachment_id))
 
-notes_fts USING fts5(title_seg, body_seg, pinyin_full, pinyin_head,
-                     tokenize='unicode61')
+notes_fts USING fts5(title_seg, body_seg, tokenize='unicode61')
+notes_py  USING fts5(py_full, py_head,   tokenize='trigram')
 ```
 
 要点：
@@ -108,21 +108,23 @@ notes_fts USING fts5(title_seg, body_seg, pinyin_full, pinyin_head,
 
 ## 4. 搜索机制
 
-`notes_fts` 存的不是原文，而是写入时由 Rust 生成的四个加工列：
+两张索引表存的都不是原文，而是写入时由 Rust 生成的加工列：
 
-| 列 | 内容 | 例（原文「知识图谱构建」） |
-|---|---|---|
-| `title_seg` | 标题分词后空格分隔 | 同 `body_seg` 规则，仅作用于标题 |
-| `body_seg` | jieba 切词后空格分隔 | `知识 图谱 构建` |
-| `pinyin_full` | 全拼 | `zhishi tupu goujian` |
-| `pinyin_head` | 首字母 | `zs tp gj` |
+| 表 | 列 | 分词器 | 内容 | 例（原文「知识图谱构建」） |
+|---|---|---|---|---|
+| `notes_fts` | `title_seg` | unicode61 | 标题分词后空格分隔 | 同 `body_seg` 规则，仅作用于标题 |
+| `notes_fts` | `body_seg` | unicode61 | jieba 切词后空格分隔 | `知识 图谱 构建` |
+| `notes_py` | `py_full` | trigram | 全拼，无空格拼接 | `zhishitupugoujian` |
+| `notes_py` | `py_head` | trigram | 首字母，无空格拼接 | `zstpgj` |
 
 **不注册 FTS5 自定义分词器。** 做法是入库时用 jieba-rs 把正文切成空格分隔的词序列存入影子列，查询时用同一分词器切一遍。效果与自定义分词器等价，但省掉 rusqlite 里注册 `fts5_api` 的 unsafe 胶水，也不会在 SQLite 版本升级时失效。
 
+**拼音单独一张表且用 trigram，是因为真实用户输入的是连写。** 若按词空格分隔存成 `zhishi tupu`，用户敲的 `zhishitupu` 一个 token 都匹配不上。trigram 支持任意子串匹配，连写、分写、局部片段（`tupu`）全部可命中。代价是跨词边界会产生无意义子串，这点噪音换连写可用，值得。
+
 查询分两条路：
 
-- **含中文**：用 jieba 切分查询，拼成**短语查询且末词带前缀**（如 `"知识 图"*`）。使「知识图」能命中「知识图谱」，同时不会误中分别提到「知识」和「图」的无关笔记。
-- **纯 ASCII**：同时匹配字面列与两个拼音列，`zhishitupu` 与 `zstp` 均能命中「知识图谱」。
+- **含中文**：用 jieba 切分查询，拼成**短语查询且末词带前缀**（如 `"知识 图" *`）。使「知识图」能命中「知识图谱」，同时不会误中分别提到「知识」和「图」的无关笔记。
+- **纯 ASCII**：归一化（转小写、去掉非字母数字）后同时匹配字面列与两个拼音列。三字符及以上走 trigram，短于三字符退回 `LIKE` 扫描（trigram 的最小匹配长度是 3）。
 
 排序用 `bm25()` 加列权重（标题高于正文），再叠一层来源加权：**字面命中 > 全拼 > 首字母**。首字母噪音天然最大，压至最后。
 
