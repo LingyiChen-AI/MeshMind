@@ -106,6 +106,35 @@ pub fn list_notes(
     Ok(notes::list(&conn, limit, offset)?)
 }
 
+/// 按标签列出笔记。
+///
+/// 筛选必须在这一层做，不能让前端在「已加载的那一页」上过滤——那样「标签」实际
+/// 会变成「最近 50 条里出现过的标签」，更早的笔记带同一个标签也筛不出来，
+/// 而界面上完全看不出区别。
+///
+/// `tag` 约定是小写：标签入库时由 `tags::parse_tags` 统一转小写，
+/// 前端的标签来源（`list_all_tags` 或笔记自带的 `tags`）给出的也都是小写。
+#[tauri::command]
+pub fn list_notes_by_tag(
+    state: State<'_, AppState>,
+    tag: String,
+    limit: u32,
+    offset: u32,
+) -> CmdResult<Vec<NoteSummary>> {
+    let conn = conn!(state);
+    Ok(notes::list_by_tag(&conn, &tag, limit, offset)?)
+}
+
+/// 全库标签与计数（只统计未软删的笔记）。
+///
+/// 是**全库**统计而不是「已加载那一页里出现过的标签」，
+/// 否则 chip 上的计数会比真实值小，用户据此判断「这个标签下只有几条」就是错的。
+#[tauri::command]
+pub fn list_all_tags(state: State<'_, AppState>) -> CmdResult<Vec<notes::tags::TagCount>> {
+    let conn = conn!(state);
+    Ok(notes::tags::all_with_counts(&conn)?)
+}
+
 #[tauri::command]
 pub fn delete_note(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let mut conn = conn!(state);
@@ -126,6 +155,28 @@ pub fn list_deleted_notes(
 ) -> CmdResult<Vec<NoteSummary>> {
     let conn = conn!(state);
     Ok(notes::list_deleted(&conn, limit, offset)?)
+}
+
+/// 彻底删除一条**已软删除**的笔记，不可撤销。笔记不在回收站里会报错
+/// （`NoteNotDeleted`）——这是刻意的：绕过回收站直接抹掉一条活着的笔记，
+/// 用户没有任何撤销余地。
+///
+/// 附件不会立刻消失：解除引用后要等下一轮 `collect_garbage`（有 1 小时宽限期）
+/// 才回收。前端必须把这句话告诉用户，否则他会以为删除没生效、转头去手删文件。
+#[tauri::command]
+pub fn purge_note(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let mut conn = conn!(state);
+    Ok(notes::purge(&mut conn, id)?)
+}
+
+/// 清空回收站，返回彻底删除的条数。不可撤销。
+///
+/// 整批在同一个事务里完成，不留下「笔记删了索引还在」的中间态。
+/// 活着的笔记一根毫毛都不碰。
+#[tauri::command]
+pub fn purge_all_deleted(state: State<'_, AppState>) -> CmdResult<usize> {
+    let mut conn = conn!(state);
+    Ok(notes::purge_all_deleted(&mut conn)?)
 }
 
 #[tauri::command]
