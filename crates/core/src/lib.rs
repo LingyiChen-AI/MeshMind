@@ -1,5 +1,7 @@
+pub mod attachments;
 pub mod db;
 pub mod error;
+pub mod notes;
 pub mod search;
 
 pub use error::{CoreError, Result};
