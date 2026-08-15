@@ -18,3 +18,8 @@ serde_json = "1"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# tauri 的 test 特性只在测试构建里启用，用于 mock runtime 跑真实 IPC 往返。
+tauri = { version = "2", features = ["test"] }
