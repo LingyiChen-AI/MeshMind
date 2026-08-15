@@ -29,17 +29,26 @@ pub enum HitSource {
 }
 
 /// 一条检索结果。
-///
-/// matched_terms 给的是「命中词」而不是 FTS5 的 snippet()：索引列存的是切词后
-/// 空格分隔的序列，snippet() 只能在这份序列上取片段，回显出来是「知识 图谱 构建」
-/// 这种带空格的坏文本。所以这里把命中词交给前端，由它在原文（body_text）上自己
-/// 定位并高亮，显示的始终是用户写下的原始文字。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
     pub note_id: i64,
     pub uuid: String,
     pub title: String,
     pub excerpt: String,
+    /// 可以直接在本条结果的 `title` / `excerpt` 原文里定位的片段，供前端高亮。
+    ///
+    /// 给的是「命中词」而不是 FTS5 的 snippet()：索引列存的是切词后空格分隔的
+    /// 序列，snippet() 只能在这份序列上取片段，回显出来是「知识 图谱 构建」这种
+    /// 带空格的坏文本。所以这里把命中词交给前端，由它在原文上自己定位并高亮，
+    /// 显示的始终是用户写下的原始文字。
+    ///
+    /// 契约的两条硬约束：
+    /// - 只放可检索的词，标点与索引内部的哨兵一律不出现（否则前端会把全文每个
+    ///   逗号都刷成高亮）；
+    /// - 每一项都必须是原文里真实存在的子串。拼音命中给不出这样的片段——
+    ///   `zhishitupu` 在「知识图谱」里根本不存在——所以拼音通道返回空 Vec，
+    ///   前端对这类结果不做高亮。反查拼音到汉字的偏移是另一个量级的工作，
+    ///   在那之前，空比一个定位不到的串诚实。
     pub matched_terms: Vec<String>,
     pub source: HitSource,
 }
@@ -59,23 +68,33 @@ pub fn search(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchHi
     // literal_match 返回 None 说明查询里没有任何可检索字符，这一路直接跳过：
     // 发一个空表达式给 FTS5 会匹配到全部记录。
     if let Some(expr) = query::literal_match(query) {
-        let terms = segment::segment_tokens(query);
+        // 高亮词与 MATCH 表达式取自同一条过滤规则，避免两边漂移。
+        let terms = segment::searchable_tokens(query);
         let rows = literal_rows(conn, &expr, limit)?;
         collect(&mut hits, &mut seen, rows, &terms, HitSource::Literal);
+    }
+
+    // 字面通道已经凑满 limit，后面两次 notes_py 扫描的结果全会被截掉，直接返回。
+    // 这不是微优化：1-2 字符的 ASCII 查询走的是 LIKE 全表扫，而这恰恰是搜索框
+    // 每敲一个键都会触发的最高频路径。
+    if hits.len() >= limit as usize {
+        hits.truncate(limit as usize);
+        return Ok(hits);
     }
 
     // 拼音通道只对纯 ASCII 查询开放。含汉字的查询走拼音没有意义，
     // 而且会在拼音列上产生大量假阳性。
     if pinyin::is_ascii_query(query) {
         let normalized = pinyin::normalize_ascii_query(query);
-        // 拼音命中没有「词」的概念，高亮词就是归一化后的查询本身。
-        let terms = vec![normalized.clone()];
         for (column, source) in [
             (PY_FULL, HitSource::PinyinFull),
             (PY_HEAD, HitSource::PinyinHead),
         ] {
             let rows = pinyin_rows(conn, column, &normalized, limit)?;
-            collect(&mut hits, &mut seen, rows, &terms, source);
+            // matched_terms 为空：见 SearchHit 上的契约说明。归一化后的查询串
+            // （"zhishitupu"）在原文「知识图谱」里并不存在，交给前端只会让它
+            // 白找一场。
+            collect(&mut hits, &mut seen, rows, &[], source);
         }
     }
 
@@ -89,13 +108,14 @@ type NoteRow = (i64, String, String, String);
 
 fn literal_rows(conn: &Connection, expr: &str, limit: u32) -> Result<Vec<NoteRow>> {
     // bm25 的权重个数必须与 FTS 表的列数一致，否则 SQLite 直接报错。
-    // 标题权重高于正文：标题里出现的词更能代表整篇笔记。
-    // bm25 返回的是负数且越小越相关，所以是升序而非降序。
+    // 标题权重高于正文：标题里出现的词更能代表整篇笔记，一次标题命中要压得过
+    // 正文里的若干次重复。bm25 返回的是负数且越小越相关，所以是升序而非降序。
+    // 末尾的 n.id 只是 tiebreak，让同分结果的顺序在多次查询间保持稳定。
     let mut stmt = conn.prepare(
         "SELECT n.id, n.uuid, n.title, n.body_text
          FROM notes_fts f JOIN notes n ON n.id = f.rowid
          WHERE notes_fts MATCH ?1 AND n.deleted_at IS NULL
-         ORDER BY bm25(notes_fts, 10.0, 1.0)
+         ORDER BY bm25(notes_fts, 10.0, 1.0), n.id
          LIMIT ?2",
     )?;
     read_rows(&mut stmt, params![expr, limit])
@@ -113,7 +133,7 @@ fn pinyin_rows(
             "SELECT n.id, n.uuid, n.title, n.body_text
              FROM notes_py p JOIN notes n ON n.id = p.rowid
              WHERE notes_py MATCH ?1 AND n.deleted_at IS NULL
-             ORDER BY rank
+             ORDER BY rank, n.id
              LIMIT ?2",
         )?;
         return read_rows(&mut stmt, params![expr, limit]);
@@ -123,11 +143,17 @@ fn pinyin_rows(
     // 不能因为 trigram 覆盖不到就当作无结果。退化成全表 LIKE 扫描：
     // 拼音列很短，量级上完全扛得住。
     // 列名不能作为绑定参数，只能格式化进 SQL；它取自本模块常量，不含用户输入。
+    //
+    // 已知取舍：这一支按「最近更新」排，上面那支按 trigram rank 排，于是用户逐字
+    // 敲 z → zs → zst 时，第 3 个字符处排序依据会整个换掉，列表出现一次无理由重排。
+    // 消不掉——两支的可用信号本就不同（LIKE 给不出相关度，短查询下 rank 也基本是
+    // 噪声），硬凑一个共同排序只会让两边都更差。这里只保证同一支内部的顺序是确定的：
+    // updated_at 相同时用 id 兜底，避免连翻页都不稳。
     let sql = format!(
         "SELECT n.id, n.uuid, n.title, n.body_text
          FROM notes_py p JOIN notes n ON n.id = p.rowid
          WHERE p.{column} LIKE ?1 AND n.deleted_at IS NULL
-         ORDER BY n.updated_at DESC
+         ORDER BY n.updated_at DESC, n.id DESC
          LIMIT ?2"
     );
     let mut stmt = conn.prepare(&sql)?;

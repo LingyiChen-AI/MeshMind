@@ -20,11 +20,22 @@ pub const TINY_PNG: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
-/// 构造一份最简 TipTap 文档 JSON。
+/// 构造一份最简 TipTap 文档 JSON：单个段落。
 pub fn doc(text: &str) -> String {
-    serde_json::json!({
-        "type": "doc",
-        "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]
-    })
-    .to_string()
+    doc_lines(&[text])
+}
+
+/// 构造一份多段落 TipTap 文档 JSON，每个入参一个 paragraph 块。
+/// 抽取出的纯文本里段落之间是 `\n`，索引侧据此插入行间哨兵。
+pub fn doc_lines(lines: &[&str]) -> String {
+    let content: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            serde_json::json!({
+                "type": "paragraph",
+                "content": [{"type": "text", "text": line}]
+            })
+        })
+        .collect();
+    serde_json::json!({ "type": "doc", "content": content }).to_string()
 }

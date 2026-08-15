@@ -79,8 +79,12 @@ pub fn create(conn: &mut Connection, new: &NewNote, now: i64) -> Result<Note> {
 
 /// 写入两张索引表。rowid 与 notes.id 对齐，这样搜索能直接 JOIN 回 notes。
 fn write_index(tx: &Transaction, id: i64, title: &str, body_text: &str) -> Result<()> {
-    let title_tokens = segment::segment_tokens(title);
-    let body_tokens = segment::segment_tokens(body_text);
+    // 逐行切词并在行间插哨兵：body_text 是各个块用 \n 拼起来的，不隔断的话
+    // 上一段的末词和下一段的首词会变成相邻 token，短语查询就会跨段落假阳性。
+    // 标题永远是单行，走同一个函数不会有哨兵产生。
+    let title_tokens = segment::index_tokens(title);
+    let body_tokens = segment::index_tokens(body_text);
+    // 哨兵不含汉字，pinyin_index 对含非汉字的词整词跳过，因此不会进拼音列。
     let (py_full, py_head) = pinyin::pinyin_index(&body_tokens);
 
     tx.execute(

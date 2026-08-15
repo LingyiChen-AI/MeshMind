@@ -70,6 +70,16 @@ mod tests {
     }
 
     #[test]
+    fn skips_the_line_sentinel() {
+        // 写索引时行间会插哨兵，它必须原样穿过拼音列而不留痕迹。
+        use crate::search::segment::LINE_SENTINEL;
+        let with = pinyin_index(&tokens(&["知识", LINE_SENTINEL, "图谱"]));
+        let without = pinyin_index(&tokens(&["知识", "图谱"]));
+        assert_eq!(with, without);
+        assert_eq!(with.0, "zhishitupu");
+    }
+
+    #[test]
     fn empty_tokens_yield_empty_columns() {
         assert_eq!(pinyin_index(&[]), (String::new(), String::new()));
     }
