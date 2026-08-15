@@ -2,6 +2,7 @@
 // 数据和回调全部由 App 注入，这样它在搜索结果、回收站等场景也能复用。
 
 import type { NoteSummary } from '../lib/ipc'
+import { keys } from '../lib/platform'
 
 /** 后端存的是毫秒时间戳（crates/core 里 `as_millis`），直接喂 Date 即可。 */
 function formatTime(ms: number): string {
@@ -25,7 +26,7 @@ export function NoteList({ notes, selectedId, onSelect, onDelete }: NoteListProp
     return (
       <div className="note-list-empty">
         <p>还没有笔记</p>
-        <p className="hint">点「新建」开始写，或按 ⌥Space 随手记一条。</p>
+        <p className="hint">点「新建」开始写，或按 {keys.capture} 随手记一条。</p>
       </div>
     )
   }

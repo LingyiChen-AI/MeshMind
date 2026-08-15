@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { collectAttachmentIds, isEmptyDoc } from './components/doc'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { ipc } from './lib/ipc'
+import { keys } from './lib/platform'
 
 export function Capture() {
   const [body, setBody] = useState<string>(EMPTY_DOC)
@@ -99,7 +100,7 @@ export function Capture() {
         </div>
       ) : null}
       <div className="capture-tip">
-        {saving ? '保存中…' : '⌘/Ctrl+Enter 保存 · Esc 取消 · 可直接粘贴截图'}
+        {saving ? '保存中…' : `${keys.save} 保存 · Esc 取消 · 可直接粘贴截图`}
       </div>
     </div>
   )

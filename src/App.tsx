@@ -16,6 +16,7 @@ import { NoteList } from './components/NoteList'
 import { SearchPanel } from './components/SearchPanel'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { ipc, type NoteSummary } from './lib/ipc'
+import { keys } from './lib/platform'
 
 const AUTOSAVE_MS = 800
 
@@ -204,7 +205,7 @@ export function App() {
             新建
           </button>
           <button type="button" onClick={() => setSearchOpen(true)}>
-            搜索 ⌘K
+            搜索 {keys.search}
           </button>
         </div>
         <div className="sidebar-list">
@@ -221,7 +222,7 @@ export function App() {
         {currentId === null ? (
           <div className="workspace-empty">
             <p>选一条笔记开始编辑</p>
-            <p className="hint">或者点左上角「新建」，⌘K 搜索已有内容。</p>
+            <p className="hint">或者点左上角「新建」，{keys.search} 搜索已有内容。</p>
           </div>
         ) : (
           <>
