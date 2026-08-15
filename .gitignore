@@ -5,3 +5,5 @@ src-tauri/target/
 *.log
 
 target
+src-tauri/gen/
+app-icon.png

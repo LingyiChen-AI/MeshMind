@@ -1,0 +1,47 @@
+/* ---------- 设计变量 ---------- */
+:root {
+  --bg: #f7f8fa;
+  --fg: #17203a;
+  --muted: #6b7280;
+  --border: #e3e6ec;
+  --accent: #2563eb;
+  --panel: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151f;
+    --fg: #e6e9f0;
+    --muted: #9aa3b2;
+    --border: #262d3b;
+    --accent: #60a5fa;
+    --panel: #171c28;
+  }
+}
+
+/* ---------- 基础重置 ---------- */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ---------- 组件样式（后续任务追加） ---------- */
