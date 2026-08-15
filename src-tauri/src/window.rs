@@ -1,6 +1,6 @@
 //! 窗口 label 常量与 show / hide 的公共动作。
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, RunEvent, Runtime};
 
 /// 与 tauri.conf.json 里的窗口定义一一对应。收敛成常量是为了让拼写错误只可能
 /// 出现在这一处，而不是散落在托盘、热键、单实例三个回调里各错一次。
@@ -35,5 +35,28 @@ pub fn toggle_capture<R: Runtime>(app: &AppHandle<R>) {
             let _ = window.show();
             let _ = window.set_focus();
         }
+    }
+}
+
+/// `App::run` 的事件回调。
+///
+/// 目前只接管一件事：macOS 上点 Dock 图标。关主窗口只是隐藏（见 main.rs 的
+/// CloseRequested 处理），而 macOS 不会自己把隐藏的窗口拉回来——不接管的话，
+/// 用户关掉窗口后点 Dock 图标毫无反应，看上去和应用已经死掉没有区别。
+///
+/// 非 macOS 上没有任何需要接管的变体，两个参数自然全部用不上。
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: &RunEvent) {
+    // `RunEvent::Reopen` 在 tauri 2.11.5 里带 `#[cfg(target_os = "macos")]`
+    // （app.rs 的 RunEvent 定义），在别的平台上连变体名都不存在，所以整条分支
+    // 必须跟着 cfg 走。另外 `RunEvent` 是 `#[non_exhaustive]`，这里用 if let 而
+    // 不是 match：既天然容纳未来新增的变体，也不会在非 macOS 上退化成一个只剩
+    // `_ => {}` 的空 match。
+    #[cfg(target_os = "macos")]
+    if let RunEvent::Reopen { .. } = event {
+        // 刻意忽略 `has_visible_windows`：它统计的是「任意可见窗口」，快捕窗口
+        // 浮在屏幕上就足以让它为 true，而那时主窗口仍然是隐藏的——恰好是这里要
+        // 修的场景。反过来，主窗口本来就在前台时再 show + focus 一次是无副作用的。
+        show_and_focus(app, MAIN);
     }
 }

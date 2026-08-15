@@ -15,13 +15,19 @@ fn capture_hotkey() -> (Shortcut, &'static str) {
             "Opt+Space",
         )
     }
-    // Windows 上 Alt+Space 是所有窗口的系统菜单（移动/最小化/关闭）的固定入口，
-    // 抢过来等于把这个入口从整个桌面上拿掉。多按一个 Shift 避开，Linux 同理从众。
+    // Windows 上这个位置是被挑剩下的，取舍链条如下：
+    // 1. `Alt+Space` 是所有窗口的系统菜单（移动/最小化/关闭）的固定入口，抢过来
+    //    等于把这个入口从整个桌面上拿掉；
+    // 2. 多按一个 Shift 变成 `Alt+Shift+Space` 又踩进另一个坑——`Alt+Shift` 是
+    //    Windows 经典的键盘布局/输入法切换组合，中文 IME 环境下按一次热键很可能
+    //    连带把输入法切了，这种「顺手改坏别的东西」比热键不生效更难排查；
+    // 3. `Ctrl+Alt+Space` 两个修饰键都不参与 IME 切换，也不是窗口菜单的入口，
+    //    是这三者里唯一干净的空位。Linux 无此冲突，但没必要为它多分叉一套按键。
     #[cfg(not(target_os = "macos"))]
     {
         (
-            Shortcut::new(Some(Modifiers::ALT.union(Modifiers::SHIFT)), Code::Space),
-            "Alt+Shift+Space",
+            Shortcut::new(Some(Modifiers::CONTROL.union(Modifiers::ALT)), Code::Space),
+            "Ctrl+Alt+Space",
         )
     }
 }

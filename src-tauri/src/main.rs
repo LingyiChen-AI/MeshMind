@@ -62,6 +62,9 @@ fn main() {
             commands::read_attachment,
             commands::collect_garbage,
         ])
-        .run(tauri::generate_context!())
-        .expect("启动 MeshMind 失败");
+        // 用 build + run 而不是一步到位的 run(context)：只有 `App::run` 这条路
+        // 能拿到 `RunEvent` 回调，而 Dock 唤起（macOS 的 Reopen）就藏在里面。
+        .build(tauri::generate_context!())
+        .expect("启动 MeshMind 失败")
+        .run(|app, event| window::on_run_event(app, &event));
 }
