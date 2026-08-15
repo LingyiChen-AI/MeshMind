@@ -1,5 +1,6 @@
 pub mod db;
 pub mod error;
+pub mod search;
 
 pub use error::{CoreError, Result};
 
