@@ -33,6 +33,29 @@ pub fn hide<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<(), String> {
         .map_err(|err| format!("收起窗口「{label}」失败: {err}"))
 }
 
+/// 切换 Dock 图标的显示状态（仅 macOS 有实际效果）。
+///
+/// `Accessory` 就是「纯菜单栏应用」：Dock 里没有图标，Cmd+Tab 里也切不到它。
+/// MeshMind 本来就是常驻托盘、靠热键唤起的形态，对不少用户来说 Dock 上那个图标
+/// 只是占位置。代价见 `commands::set_hide_dock_icon` 的文档注释。
+///
+/// 非 macOS 上是空实现：Windows 的任务栏图标由窗口自己控制（快捕窗口已经
+/// `skipTaskbar`），Linux 各桌面环境行为不一，都没有对应的进程级开关。
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn set_dock_icon_hidden<R: Runtime>(app: &AppHandle<R>, hidden: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if hidden {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        app.set_activation_policy(policy)
+            .map_err(|err| format!("切换 Dock 图标显示状态失败: {err}"))?;
+    }
+    Ok(())
+}
+
 /// 快捕窗口的开关：可见就收起，不可见就唤起。
 pub fn toggle_capture<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window(CAPTURE) else {

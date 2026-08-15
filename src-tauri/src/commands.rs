@@ -1,14 +1,17 @@
 //! IPC 命令层：把 meshmind-core 的能力暴露给前端。
 
+use std::collections::BTreeMap;
+
 use meshmind_core::attachments::{self, Attachment};
 use meshmind_core::notes::{self, NewNote, Note, NoteSummary};
 use meshmind_core::search::{self, SearchHit};
 use meshmind_core::{now_ms, CoreError};
 use serde::{Serialize, Serializer};
+use tauri::ipc::Response;
 use tauri::{AppHandle, Runtime, State};
 
 use crate::state::AppState;
-use crate::window;
+use crate::{quit, settings, shortcut, window};
 
 /// 传给前端的错误。
 ///
@@ -186,16 +189,25 @@ pub fn store_attachment(
     )?)
 }
 
-/// 读附件原始字节。前端拿到后自行建 blob URL 显示图片。
+/// 读附件原始字节。前端拿到的是 `ArrayBuffer`，自行建 blob URL 显示图片。
+///
+/// 返回 `tauri::ipc::Response` 而不是 `Vec<u8>`：`Vec<u8>` 会被 serde 序列化成 JSON
+/// 数字数组，一张 2MB 的截图变成约 7MB 的文本，还要在 JS 侧逐个元素解析回数组——
+/// 粘贴大图时那阵卡顿就是这么来的。`Response::new` 走 IPC 的 raw 通道，字节原样过去，
+/// 前端拿到的直接是 `ArrayBuffer`，两边都不再有序列化开销。
+///
+/// **这是一处前端契约变更**：`invoke("read_attachment", { id })` 的返回值
+/// 从 `number[]` 变成 `ArrayBuffer`，前端要用 `new Uint8Array(buf)` / `new Blob([buf])` 接。
 #[tauri::command]
-pub fn read_attachment(state: State<'_, AppState>, id: i64) -> CmdResult<Vec<u8>> {
+pub fn read_attachment(state: State<'_, AppState>, id: i64) -> CmdResult<Response> {
     let conn = conn!(state);
     let attachment = attachments::get(&conn, id)?.ok_or(CoreError::AttachmentNotFound(id))?;
     let path = state.attachments_root.join(attachments::relative_path(
         &attachment.sha256,
         &attachment.ext,
     ));
-    Ok(std::fs::read(path).map_err(CoreError::from)?)
+    let bytes = std::fs::read(path).map_err(CoreError::from)?;
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]
@@ -216,6 +228,139 @@ pub fn collect_garbage(state: State<'_, AppState>) -> CmdResult<usize> {
 #[tauri::command]
 pub fn hide_capture_window<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
     Ok(window::hide(&app, window::CAPTURE)?)
+}
+
+/// 前端已经把待保存内容落盘，可以退出了。
+///
+/// 这是 `app-quit-requested` 事件的回执。前端**必须**在保存完成后（成功或失败都算）
+/// 调一次：不调也退得掉（有 2 秒兜底），但那 2 秒里用户对着一个点了没反应的菜单项。
+#[tauri::command]
+pub fn confirm_quit<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
+    quit::confirm_quit(&app);
+    Ok(())
+}
+
+/// 读全部设置项。值一律是字符串，语义由前端解释。
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> CmdResult<BTreeMap<String, String>> {
+    let conn = conn!(state);
+    Ok(meshmind_core::settings::get_all(&conn)?)
+}
+
+/// 写一个设置项。
+///
+/// key 必须在 [`settings::ALLOWED_KEYS`] 里；值不校验（解释权在前端）。
+/// 唯一的例外是热键：它有专门的 [`set_capture_hotkey`]，因为改热键不只是写一行库，
+/// 还要真的把键注册上去——只走这里的话库里写了新键、系统上生效的还是旧键。
+#[tauri::command]
+pub fn set_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
+    settings::ensure_allowed(&key)?;
+    let conn = conn!(state);
+    Ok(meshmind_core::settings::set(&conn, &key, &value)?)
+}
+
+/// 运行时更换快捕热键，成功后写进设置。
+///
+/// `accelerator` 的语法见 [`shortcut::ACCELERATOR_SYNTAX`]，形如 `"CommandOrControl+Shift+K"`。
+///
+/// 注册和落库任一步失败都回滚到原热键：中间态（新键没注册上、旧键也注销了）意味着
+/// 快捕功能在用户不知情的情况下彻底失灵，比「改键没成功」严重得多。
+#[tauri::command]
+pub fn set_capture_hotkey<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    accelerator: String,
+) -> CmdResult<()> {
+    let previous = shortcut::current(&app);
+    shortcut::rebind(&app, &accelerator)?;
+
+    let conn = conn!(state);
+    let stored = accelerator.trim();
+    if let Err(err) = meshmind_core::settings::set(&conn, settings::KEY_CAPTURE_HOTKEY, stored) {
+        // 先放锁再回滚：回滚要经由主线程注册热键，而主线程有可能正等着别的东西，
+        // 攥着数据库锁进这段等待是给死锁留口子。
+        drop(conn);
+        shortcut::rollback(&app, previous);
+        return Err(CommandError(format!(
+            "热键「{stored}」已生效但写入设置失败（{err}），已回滚到原热键。"
+        )));
+    }
+    Ok(())
+}
+
+/// 隐藏 / 显示 Dock 图标，并把选择写进设置。仅 macOS 有实际效果。
+///
+/// **副作用（前端务必在 UI 上告知用户）**：切成 `Accessory` 后 Dock 上不再有 MeshMind
+/// 的图标，随之消失的还有「点 Dock 图标把主窗口叫回来」这条路径——macOS 的 Reopen
+/// 事件由点击 Dock 图标触发，图标没了，`window::on_run_event` 里那段唤起逻辑就再也
+/// 不会被调用。此后能唤回主窗口的入口只剩托盘菜单和快捕热键。在热键注册失败的机器上
+/// （托盘 tooltip 会带 ⚠），入口就只剩托盘一个了，打开这个开关前更该提醒一句。
+///
+/// 非 macOS 平台上只落库不做任何事：这个键是给 macOS 用的，但设置表是跨平台同一张，
+/// 静默存下来比报错好——用户在 Windows 上不会看到这个开关，也就不会误触。
+#[tauri::command]
+pub fn set_hide_dock_icon<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    hide: bool,
+) -> CmdResult<()> {
+    window::set_dock_icon_hidden(&app, hide)?;
+
+    let conn = conn!(state);
+    if let Err(err) = meshmind_core::settings::set(
+        &conn,
+        settings::KEY_HIDE_DOCK_ICON,
+        settings::write_bool(hide),
+    ) {
+        drop(conn);
+        // 不回滚的话，这次会话里图标已经藏了，重启后又冒出来——用户会以为开关坏了。
+        let _ = window::set_dock_icon_hidden(&app, !hide);
+        return Err(CommandError(format!(
+            "Dock 图标显示状态已切换但写入设置失败（{err}），已恢复原状。"
+        )));
+    }
+    Ok(())
+}
+
+/// 开 / 关开机自启，并把选择写进设置。
+///
+/// 真正的落点在系统里，不在这张表里：macOS 是 `~/Library/LaunchAgents/MeshMind.plist`，
+/// Windows 是注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `MeshMind` 项。
+/// 库里存的那份只是给设置页回显用的镜像——用户完全可能绕过应用直接去删注册表项或
+/// plist，那之后两者就对不上了。所以**先动系统、成功了再写库**，顺序反过来的话
+/// 一次失败的 enable 会留下一个说「已开启」的设置项。
+#[tauri::command]
+pub fn set_autostart<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<()> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let manager = app.autolaunch();
+    let apply = |on: bool| {
+        if on {
+            manager.enable()
+        } else {
+            manager.disable()
+        }
+    };
+    let verb = if enabled { "开启" } else { "关闭" };
+    apply(enabled).map_err(|err| CommandError(format!("{verb}开机自启失败: {err}")))?;
+
+    let conn = conn!(state);
+    if let Err(err) = meshmind_core::settings::set(
+        &conn,
+        settings::KEY_AUTOSTART,
+        settings::write_bool(enabled),
+    ) {
+        drop(conn);
+        let _ = apply(!enabled);
+        return Err(CommandError(format!(
+            "开机自启已{verb}但写入设置失败（{err}），已恢复原状。"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -291,7 +436,16 @@ mod tests {
             cmd: &str,
             body: serde_json::Value,
         ) -> Result<serde_json::Value, serde_json::Value> {
-            let res = tauri::test::get_ipc_response(
+            invoke_raw(webview, cmd, body).map(|b| b.deserialize::<serde_json::Value>().unwrap())
+        }
+
+        /// 不做反序列化的版本：用来验证响应走的是 JSON 还是 raw 通道。
+        fn invoke_raw(
+            webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+            cmd: &str,
+            body: serde_json::Value,
+        ) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+            tauri::test::get_ipc_response(
                 webview,
                 InvokeRequest {
                     cmd: cmd.into(),
@@ -308,8 +462,7 @@ mod tests {
                     headers: Default::default(),
                     invoke_key: INVOKE_KEY.to_string(),
                 },
-            );
-            res.map(|b| b.deserialize::<serde_json::Value>().unwrap())
+            )
         }
 
         #[test]
@@ -413,6 +566,103 @@ mod tests {
 
             invoke(&capture, "hide_capture_window", serde_json::json!({}))
                 .expect("快捕窗口存在时应当收起成功");
+        }
+
+        /// `read_attachment` 的返回必须走 raw 通道。
+        ///
+        /// 这条测试盯的是性能契约而不是功能：改回 `Vec<u8>` 功能照样是对的，
+        /// 只是每张图都要多付一次「字节 → JSON 数字数组 → 字节」的来回，
+        /// 2MB 的截图会膨胀成约 7MB 文本。功能测试抓不到这种退化，只能这样钉住。
+        #[test]
+        fn read_attachment_answers_with_raw_bytes() {
+            let dir = tempfile::tempdir().unwrap();
+            let state = AppState::initialize(dir.path()).unwrap();
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![
+                    super::super::store_attachment,
+                    super::super::read_attachment,
+                ])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            app.manage(state);
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .unwrap();
+
+            // 挑一串必然不是合法 UTF-8 的字节：raw 通道要能原样送过去。
+            let bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x0d];
+            let stored = invoke(
+                &webview,
+                "store_attachment",
+                serde_json::json!({ "bytes": bytes, "ext": "png" }),
+            )
+            .expect("store_attachment 应当成功");
+            let id = stored["id"].as_i64().unwrap();
+
+            let body = invoke_raw(&webview, "read_attachment", serde_json::json!({ "id": id }))
+                .expect("read_attachment 应当成功");
+            match body {
+                tauri::ipc::InvokeResponseBody::Raw(actual) => assert_eq!(actual, bytes),
+                tauri::ipc::InvokeResponseBody::Json(json) => {
+                    panic!("附件字节不该走 JSON 通道，实际: {json}")
+                }
+            }
+        }
+
+        /// 设置项的白名单在 IPC 这一层就要生效：这是设置表唯一的入口。
+        #[test]
+        fn settings_round_trip_and_reject_unknown_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            let state = AppState::initialize(dir.path()).unwrap();
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![
+                    super::super::get_settings,
+                    super::super::set_setting,
+                ])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            app.manage(state);
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .unwrap();
+
+            assert_eq!(
+                invoke(&webview, "get_settings", serde_json::json!({})).unwrap(),
+                serde_json::json!({}),
+                "全新的库里不该有任何设置项"
+            );
+
+            invoke(
+                &webview,
+                "set_setting",
+                serde_json::json!({ "key": crate::settings::KEY_AUTOSTART, "value": "true" }),
+            )
+            .expect("白名单内的 key 应当写入成功");
+
+            assert_eq!(
+                invoke(&webview, "get_settings", serde_json::json!({})).unwrap()
+                    [crate::settings::KEY_AUTOSTART],
+                "true"
+            );
+
+            let err = invoke(
+                &webview,
+                "set_setting",
+                serde_json::json!({ "key": "hotkey.captrue", "value": "Alt+Space" }),
+            )
+            .expect_err("拼错的 key 不该落进设置表");
+            let message = err.as_str().unwrap_or_default();
+            assert!(
+                message.contains("hotkey.captrue"),
+                "错误里应点名这个 key，实际: {err}"
+            );
+
+            // 被拒的那次不能留下任何痕迹。
+            let all = invoke(&webview, "get_settings", serde_json::json!({})).unwrap();
+            assert!(
+                all.get("hotkey.captrue").is_none(),
+                "被拒的 key 不该出现在设置表里: {all}"
+            );
         }
 
         #[test]

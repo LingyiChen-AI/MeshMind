@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod gc;
+mod quit;
+mod settings;
 mod shortcut;
 mod state;
 mod tray;
@@ -20,6 +23,14 @@ fn main() {
             window::show_and_focus(app, window::MAIN);
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // 开机自启的实际落点在系统里：macOS 写 ~/Library/LaunchAgents/MeshMind.plist，
+        // Windows 写注册表 HKCU\...\CurrentVersion\Run。选 LaunchAgent 而不是 AppleScript：
+        // AppleScript 那条路要弹「允许 MeshMind 控制 系统事件」的自动化授权，
+        // 为一个开关去要一份能操作整个系统的权限，代价和收益完全不成比例。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // 迁移失败必须就地崩溃，绝不静默降级：带着一个半迁移的库继续跑，
@@ -33,8 +44,37 @@ fn main() {
             });
             app.manage(state);
 
-            // 先注册热键再建托盘：注册失败的说明要作为 tooltip 的一部分交给托盘。
-            let hotkey_warning = shortcut::register_capture_hotkey(app.handle());
+            // 附件只增不减是个慢性问题：每次粘贴都落一份文件，而没被任何笔记引用的
+            // 那些（撤销掉的粘贴、崩溃前没保存的草稿）永远没人来收。启动是唯一一个
+            // 「用户还没开始编辑、不会和 GC 抢同一批附件」的时刻。丢后台跑，失败不影响启动。
+            gc::spawn_startup_gc(app.handle());
+
+            // 退出协调器要在托盘之前托管好：托盘菜单的「退出」回调会取它。
+            quit::setup(app.handle());
+
+            // 读设置决定这一轮的热键与 Dock 图标策略。两者都在拿到 AppState 之后、
+            // 建托盘之前：热键注册失败的说明要作为 tooltip 的一部分交给托盘。
+            let (configured_hotkey, hide_dock_icon) = {
+                let app_state = app.state::<AppState>();
+                let conn = app_state.conn.lock().expect("数据库连接锁已中毒");
+                let hotkey = meshmind_core::settings::get(&conn, settings::KEY_CAPTURE_HOTKEY)
+                    .unwrap_or_else(|err| {
+                        eprintln!("[MeshMind] 读取快捕热键设置失败（改用平台默认键）: {err}");
+                        None
+                    });
+                (
+                    hotkey,
+                    settings::read_bool(&conn, settings::KEY_HIDE_DOCK_ICON),
+                )
+            };
+
+            // 失败只记一笔：Dock 图标藏没藏成不值得挡住启动，而且用户马上就能在
+            // Dock 上看到结果——比任何错误弹窗都直观。
+            if let Err(err) = window::set_dock_icon_hidden(app.handle(), hide_dock_icon) {
+                eprintln!("[MeshMind] {err}");
+            }
+
+            let hotkey_warning = shortcut::setup(app.handle(), configured_hotkey.as_deref());
             tray::setup(app, hotkey_warning)?;
             Ok(())
         })
@@ -62,6 +102,12 @@ fn main() {
             commands::read_attachment,
             commands::collect_garbage,
             commands::hide_capture_window,
+            commands::confirm_quit,
+            commands::get_settings,
+            commands::set_setting,
+            commands::set_capture_hotkey,
+            commands::set_hide_dock_icon,
+            commands::set_autostart,
         ])
         // 用 build + run 而不是一步到位的 run(context)：只有 `App::run` 这条路
         // 能拿到 `RunEvent` 回调，而 Dock 唤起（macOS 的 Reopen）就藏在里面。

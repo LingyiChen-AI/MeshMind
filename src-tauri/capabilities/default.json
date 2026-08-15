@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口与快捕窗口的默认权限。core:window:default 是纯只读集合（get-all-windows / is-visible / title 之类），不含 allow-hide，所以前端调 getCurrentWindow().hide() 会被 ACL 拒掉；窗口收起的正路是 hide_capture_window 命令，这里单独补 allow-hide 只是给直接调 window API 的路径留一条后路。",
+  "description": "主窗口与快捕窗口的默认权限。core:window:default 是纯只读集合（get-all-windows / is-visible / title 之类），不含 allow-hide，所以前端调 getCurrentWindow().hide() 会被 ACL 拒掉；窗口收起的正路是 hide_capture_window 命令，这里单独补 allow-hide 只是给直接调 window API 的路径留一条后路。app-quit-requested 事件不需要额外权限：listen 走 core:event:allow-listen，已含在 core:default 里。autostart:default 只放行 is_enabled/enable/disable 三个命令，留着是因为库里那份 startup.autostart 只是镜像——用户可能绕过应用直接删掉 LaunchAgent 或注册表项，设置页要显示真实状态就得能问系统本身。",
   "windows": ["main", "capture"],
   "permissions": [
     "core:default",
     "global-shortcut:default",
-    "core:window:allow-hide"
+    "core:window:allow-hide",
+    "autostart:default"
   ]
 }

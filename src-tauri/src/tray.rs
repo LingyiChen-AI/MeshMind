@@ -4,7 +4,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::App;
 
-use crate::window;
+use crate::{quit, window};
 
 /// 建托盘。
 ///
@@ -27,7 +27,9 @@ pub fn setup(app: &App, hotkey_warning: Option<String>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => window::show_and_focus(app, window::MAIN),
             "capture" => window::show_and_focus(app, window::CAPTURE),
-            "quit" => app.exit(0),
+            // 不直接 exit：前端的编辑是防抖保存的，立刻退会把最后一次编辑静默吞掉。
+            // 走 request_quit 先给前端一个落盘的机会（带 2 秒兜底，见 quit.rs）。
+            "quit" => quit::request_quit(app),
             _ => {}
         });
 
