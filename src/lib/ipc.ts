@@ -220,4 +220,53 @@ export const ipc = {
   hideCaptureWindow(): Promise<void> {
     return call<void>('hide_capture_window')
   },
+
+  /**
+   * 「待保存的内容已经落盘，可以退了」——`app-quit-requested` 事件的回执。
+   *
+   * 必须在落盘之后调一次，**成功失败都要调**：不调也退得掉（外壳有 2 秒兜底），
+   * 但那 2 秒里用户对着一个点了没反应的退出菜单。
+   */
+  confirmQuit(): Promise<void> {
+    return call<void>('confirm_quit')
+  },
+
+  /**
+   * 读全部设置。**第二个绕开 `call`（也就是绕开 `toCamel`）的命令**，理由和
+   * readAttachment 不同但同样致命：
+   *
+   * 返回的是一张 BTreeMap，它的**键是设置项名**（`macos.hide_dock_icon`），
+   * 不是 Rust 结构体的字段名。`toCamel` 见到对象就递归改键，会把它变成
+   * `macos.hideDockIcon`——之后拿 SETTING_KEYS 里的常量去取值，全是 undefined，
+   * 界面上表现为「所有设置都是默认值，改完刷新又变回去」。
+   *
+   * 值一律是字符串，语义解释在 lib/settings.ts。
+   */
+  getSettings(): Promise<Record<string, string>> {
+    return invoke<Record<string, string>>('get_settings')
+  },
+
+  // 外壳还有一个通用的 `set_setting`，这里**刻意不封装**：三个设置项全都不能只写库。
+  // 热键要真的注册上去、Dock 图标要真的切换、自启要真的写进 LaunchAgent/注册表，
+  // 各自都有下面的专用命令（它们都是先动系统、成功了才落库，失败会回滚）。
+  // 只走 set_setting 的结果是库里是新值、系统上还是旧行为，而且没有任何报错。
+  // 将来真有「纯记录型」的设置项时再加回来。
+
+  /**
+   * 换快捕热键并落库。`accelerator` 语法见 lib/accelerator.ts。
+   * 失败时（最常见是被别的应用占用）reject 一句中文，里面会说明原热键保持不变。
+   */
+  setCaptureHotkey(accelerator: string): Promise<void> {
+    return call<void>('set_capture_hotkey', { accelerator })
+  },
+
+  /** 隐藏 / 显示 Dock 图标（仅 macOS 有实际效果），并落库。 */
+  setHideDockIcon(hide: boolean): Promise<void> {
+    return call<void>('set_hide_dock_icon', { hide })
+  },
+
+  /** 开 / 关开机自启（真的写系统的自启项），并落库。 */
+  setAutostart(enabled: boolean): Promise<void> {
+    return call<void>('set_autostart', { enabled })
+  },
 }

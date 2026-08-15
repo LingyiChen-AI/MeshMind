@@ -1,10 +1,15 @@
 // 主窗口：左侧笔记流 + 右侧编辑器，⌘/Ctrl+K 唤起搜索。
 //
-// 状态归属：笔记列表（分页）、标签、当前笔记正文、面板开关都在这里；
+// 状态归属：笔记列表（分页）、标签、当前笔记正文、遮罩层都在这里；
 // NoteList / TagFilter 是纯展示组件。主列表相关的 IPC 都在这一层收口并 catch，
 // 失败统一落到底部错误栏——ipc 层 reject 的是字符串，String(e) 就是可读的中文消息。
-// SearchPanel / TrashPanel 自带独立的数据流（各自的检索与回收站列表），
+// SearchPanel / TrashPanel / SettingsPanel 自带独立的数据流，
 // 在自己内部发 IPC、自己显示错误，只在数据真的变了之后回调这里刷新。
+//
+// 三个面板都是全屏遮罩，用一个 `overlay` 状态互斥（lib/overlay.ts），不是三个 boolean。
+//
+// 退出：托盘「退出」不会直接杀进程，外壳先 emit('app-quit-requested') 等这里落盘。
+// 主窗口是唯一负责回 confirm_quit 的窗口——见下面那个 effect 的注释。
 //
 // 列表分页的两种刷新语义，改之前先读明白（reloadList / refreshAfterSave 各自的注释）：
 // 「集合变了」重拉已加载的全部页，「保存完了」只重拉第一页再并回来。
@@ -23,11 +28,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { NoteList } from './components/NoteList'
 import { SearchPanel } from './components/SearchPanel'
+import { SettingsPanel } from './components/SettingsPanel'
 import { TagFilter } from './components/TagFilter'
 import { TrashPanel } from './components/TrashPanel'
 import { Editor, EMPTY_DOC } from './editor/Editor'
 import { collectAttachmentIds } from './lib/doc'
 import { ipc, type NoteSummary, type TagCount } from './lib/ipc'
+import { type ActiveOverlay, closeOverlay, toggleOverlay } from './lib/overlay'
 import {
   appendPage,
   emptyPage,
@@ -42,6 +49,15 @@ import { keys } from './lib/platform'
 import { resolveActiveTag, sortTags } from './lib/tags'
 
 const AUTOSAVE_MS = 800
+
+// 退出前等在途保存结束的上限。
+//
+// 为什么要等：在途的那次存的是**旧内容**，pendingRef 里才是最新的。两者并发写同一条
+// 笔记时落地顺序不可控，旧的可能盖掉新的。等它结束再写就没有这个问题。
+// 为什么有上限：外壳 2 秒后强杀，等太久等于把落盘的时间全花在等待上。
+// 等超时了仍然照写——并发写是「可能丢」，不写是「一定丢」。
+const QUIT_INFLIGHT_WAIT_MS = 600
+const QUIT_POLL_MS = 25
 
 // 失败重试用指数退避（1.5s / 3s / 6s / 12s）而不是继续按 800ms 死循环：
 // 磁盘满、库被 WAL checkpoint 锁住这类故障不会在一秒内自愈，
@@ -68,8 +84,8 @@ export function App() {
   const [currentId, setCurrentId] = useState<number | null>(null)
   const [body, setBody] = useState<string>(EMPTY_DOC)
   const [status, setStatus] = useState<SaveStatus>('idle')
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [trashOpen, setTrashOpen] = useState(false)
+  // 三个全屏遮罩（搜索 / 回收站 / 设置）共用这一个状态——理由见 lib/overlay.ts。
+  const [overlay, setOverlay] = useState<ActiveOverlay>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [rebuilding, setRebuilding] = useState(false)
@@ -271,6 +287,38 @@ export function App() {
 
   flushRef.current = flushSave
 
+  /**
+   * 退出前的最后一次落盘。**不是** flushSave，两者的取舍完全不同：
+   *
+   * - 不重试。flushSave 失败会按 1.5s/3s/6s/12s 退避重排，而外壳只给 2 秒，
+   *   第一次退避就已经超时了——等于用一次必然被强杀的等待换一次可能成功的重试。
+   *   宁可丢这一次编辑，也不能让「退出」这个动作变成 2 秒的卡顿。
+   * - 不管在途的串行化闸门。flushSave 见到在途保存会直接返回、把 pending 留给下一轮，
+   *   但退出场景没有下一轮了：留下就是丢。所以这里先等在途结束（有上限），再写。
+   * - 失败只记一笔日志、顺带把错误摆到界面上（万一退出被兜底延后，用户还能看见）。
+   */
+  const flushBeforeQuit = useCallback(async () => {
+    cancelTimer()
+
+    const deadline = Date.now() + QUIT_INFLIGHT_WAIT_MS
+    while (inFlightIdRef.current !== null && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, QUIT_POLL_MS))
+    }
+
+    const job = pendingRef.current
+    pendingRef.current = null
+    if (!job) return
+
+    try {
+      await ipc.updateNote(job.id, job.bodyJson, collectAttachmentIds(job.bodyJson))
+      // 刻意不刷新列表和标签：应用马上就没了，那两个请求只会跟落盘抢那 2 秒。
+      settleStatus()
+    } catch (err) {
+      console.error('[app] 退出前保存失败', err)
+      setError(String(err))
+    }
+  }, [cancelTimer, settleStatus])
+
   // 首屏 / 切换标签筛选：回到第一页重新开始分页。
   // listPage 的身份只随 activeTag 变，所以这个 effect 不会因为别的 state 抖动而重跑。
   // alive 标志处理「连点两个标签」的竞态：慢的旧请求回来时不许写进 state。
@@ -322,6 +370,42 @@ export function App() {
     }
   }, [refresh])
 
+  // 托盘「退出」→ 外壳 emit('app-quit-requested') → 这里落盘 → 回 confirm_quit → 退出。
+  // 没有这一段的话，800ms 防抖窗口里的最后一次编辑会被静默丢掉。
+  //
+  // confirm_quit 放在 finally 里，落盘成功失败都要调：不调也退得掉（外壳 2 秒兜底），
+  // 但那 2 秒里用户对着一个点了没反应的菜单项，只会以为应用卡死了。
+  // 连点两次「退出」不必在这里去重——外壳侧用原子量挡住了，事件只会来一次。
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: UnlistenFn | null = null
+
+    listen('app-quit-requested', () => {
+      void (async () => {
+        try {
+          await flushBeforeQuit()
+        } finally {
+          // confirmQuit 自己也可能 reject（外壳没起来之类）。这里不能让它变成
+          // 未处理的 rejection——虽然进程马上就要没了，但真出问题时日志是唯一线索。
+          await ipc.confirmQuit().catch((err: unknown) => {
+            console.error('[app] confirm_quit 失败，等外壳的 2 秒兜底', err)
+          })
+        }
+      })()
+    }).then(
+      (fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      },
+      (err: unknown) => setError(String(err)),
+    )
+
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [flushBeforeQuit])
+
   // 卸载时清计时器，并尽力把最后一次改动写下去（不能 await，清理函数是同步的）。
   useEffect(() => {
     return () => {
@@ -344,15 +428,13 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  // ⌘/Ctrl+K 开关搜索面板。Esc 由 SearchPanel 自己处理。
+  // ⌘/Ctrl+K 开关搜索面板。Esc 由各面板自己处理。
+  // toggleOverlay 天然保证「同时只有一层」：开着回收站时按 ⌘K 直接换成搜索。
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        // 两个面板都是全屏遮罩，不叠着开：否则 Esc 一次只关掉一层，
-        // 用户会以为按键没生效。
-        setTrashOpen(false)
-        setSearchOpen((prev) => !prev)
+        setOverlay((prev) => toggleOverlay(prev, 'search'))
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -429,7 +511,7 @@ export function App() {
 
   const handlePick = useCallback(
     (noteId: number) => {
-      setSearchOpen(false)
+      setOverlay((prev) => closeOverlay(prev, 'search'))
       void openNote(noteId)
     },
     [openNote],
@@ -466,7 +548,7 @@ export function App() {
           <button type="button" className="primary" onClick={() => void createNote()}>
             新建
           </button>
-          <button type="button" onClick={() => setSearchOpen(true)}>
+          <button type="button" onClick={() => setOverlay('search')}>
             搜索 {keys.search}
           </button>
         </div>
@@ -495,12 +577,17 @@ export function App() {
             type="button"
             className="subtle"
             title="被删除的笔记会先落在回收站，可以恢复"
-            onClick={() => {
-              setSearchOpen(false)
-              setTrashOpen(true)
-            }}
+            onClick={() => setOverlay('trash')}
           >
             回收站
+          </button>
+          <button
+            type="button"
+            className="subtle"
+            title="快捕热键、Dock 图标与开机自启"
+            onClick={() => setOverlay('settings')}
+          >
+            设置
           </button>
           <button
             type="button"
@@ -530,16 +617,25 @@ export function App() {
         )}
       </main>
 
-      {searchOpen ? (
-        <SearchPanel onClose={() => setSearchOpen(false)} onPick={handlePick} />
+      {/* 三层遮罩由 overlay 一个状态决定，天然互斥；各面板的 onClose 只关掉自己那层
+          （closeOverlay），因为它可能是异步回调，那时前台可能已经换层了。 */}
+      {overlay === 'search' ? (
+        <SearchPanel
+          onClose={() => setOverlay((prev) => closeOverlay(prev, 'search'))}
+          onPick={handlePick}
+        />
       ) : null}
 
-      {trashOpen ? (
+      {overlay === 'trash' ? (
         <TrashPanel
-          onClose={() => setTrashOpen(false)}
+          onClose={() => setOverlay((prev) => closeOverlay(prev, 'trash'))}
           onChanged={handleTrashChanged}
           onRestored={handleRestored}
         />
+      ) : null}
+
+      {overlay === 'settings' ? (
+        <SettingsPanel onClose={() => setOverlay((prev) => closeOverlay(prev, 'settings'))} />
       ) : null}
 
       {error ? (

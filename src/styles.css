@@ -536,6 +536,72 @@ button.danger:hover:not(:disabled) {
   margin: 2px 0;
 }
 
+/* ---------- 设置面板 ---------- */
+/* 同样复用 .search-overlay / .search-panel 的骨架。 */
+.settings-body {
+  overflow-y: auto;
+}
+
+.settings-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 整行都是 label 时（两个开关），点文字也应该能切换 */
+label.settings-row {
+  cursor: pointer;
+}
+
+.settings-label {
+  font-weight: 600;
+}
+
+.settings-row .settings-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--muted);
+}
+
+/* 规范化后的显示名旁边挂一份原始加速键字符串：改键失败时用户报的就是这一串 */
+.settings-raw {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.settings-row button {
+  flex: 0 0 auto;
+}
+
+/* 录制中：按钮要一眼看出来「它正在等你按键」 */
+.settings-row button.recording {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-hint,
+.settings-warn {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 「隐藏 Dock 图标之后可能只剩托盘一个入口」这类不可逆风险，不能和普通说明一个颜色 */
+.settings-warn {
+  padding: 6px 8px;
+  color: #b45309;
+  background: color-mix(in srgb, #f59e0b 14%, transparent);
+  border-radius: 4px;
+}
+
 /* ---------- 快捕窗口 ---------- */
 .capture {
   display: flex;
