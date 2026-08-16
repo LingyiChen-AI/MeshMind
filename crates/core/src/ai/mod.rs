@@ -13,6 +13,4 @@ pub mod provider;
 pub mod retrieve;
 pub mod vector;
 
-// `AiConfig` 与 `Provider` 尚未定义（Task 6 才写 provider），此处先不导出：
-// 提前写 `pub use` 会让整个 crate 编译不过，把后续任务全部卡在门外。
-// pub use provider::{AiConfig, Provider};
+pub use provider::{AiConfig, Provider};
