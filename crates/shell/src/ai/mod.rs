@@ -1,8 +1,10 @@
 //! 外壳侧的 AI：配置、HTTP、后台向量化、问答编排。
 //!
-//! 这一层的入口（发请求、取消提问、唤醒 worker）要等后台 worker 与问答编排
-//! 接上才会有调用者，在那之前 dead_code 会把 `-D warnings` 的构建整个染红。
-//! 两者落地后删掉这行 allow。
+//! 整个模块的入口（`worker::spawn`、`begin_ask` / `cancel_ask`、`wake_worker`）
+//! 都要等命令层与问答编排接上才会有调用者。在那之前它们对 dead_code 分析而言
+//! 全是不可达的，会把 `-D warnings` 的构建整个染红——注意这条 allow 撤不掉的
+//! 前提是**整个模块没有任何一个外部调用者**，只补上其中一半（比如现在 worker
+//! 已经写完但还没人 spawn 它）并不足以撤销。命令层落地后连同这行一起删掉。
 #![allow(dead_code)]
 
 pub mod ask;
