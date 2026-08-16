@@ -602,6 +602,69 @@ label.settings-row {
   border-radius: 4px;
 }
 
+/* 索引失败、连接测试没通这类「真的坏了」的消息。和 .settings-warn（琥珀色的
+   「有风险但没坏」）分开：两者一个颜色的话，用户分不清哪条是需要立刻处理的。 */
+.settings-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #dc2626;
+}
+
+/* ---------- 设置面板里的 AI 一节 ---------- */
+/* 一行一个字段：标签 + 控件。热键那种「标签 + 值 + 按钮」的 .settings-row
+   在这里不合用——输入框要占满剩余宽度，不然 Base URL 只能看见前十几个字符。 */
+.ai-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ai-field-label {
+  flex: 0 0 96px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 全局只有 .search-input 一个输入框样式，而它是「无边框、贴着面板」的搜索条，
+   套到表单上会看不出哪里能点。这里给表单控件补一套跟按钮同规格的外观，
+   顺带把颜色接到主题变量上——不接的话深色模式下是刺眼的白底黑字。 */
+.ai-field input,
+.ai-field select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+.ai-field input:focus,
+.ai-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ai-field button {
+  flex: 0 0 auto;
+}
+
+/* 连接测试结果、索引错误：几行紧挨着的小字，别用段落默认的行距撑开 */
+.ai-report {
+  margin-top: 6px;
+}
+
+.ai-report p {
+  margin: 2px 0;
+}
+
+/* 确认块里的按钮排一行（复用回收站条目动作的间距） */
+.ai-settings .settings-warn p {
+  margin: 0 0 4px;
+}
+
 /* ---------- 快捕窗口 ---------- */
 .capture {
   display: flex;
