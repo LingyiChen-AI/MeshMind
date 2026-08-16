@@ -18,6 +18,11 @@ tauri-plugin-process = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 关掉默认特性并改用 rustls：默认的 native-tls 会在 Windows 上引入
+# OpenSSL 构建依赖，CI 会直接红。
+# 用 blocking 而不是异步流：外壳没有 async runtime，为 AI 单独引入一个太重；
+# blocking::Response 实现了 Read，边读边分帧就是流式。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 
 [features]
 default = ["custom-protocol"]
