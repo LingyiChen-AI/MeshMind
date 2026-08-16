@@ -459,11 +459,14 @@ export function AiSettings() {
           </label>
         ))}
 
-        {/* Ollama 走本机，没有密钥这回事。留着一个填了也没用的输入框只会让人以为漏配了。 */}
-        {form.provider === 'openai' ? (
+        {/* Ollama 走本机，没有密钥这回事，留着一个填了也没用的输入框只会让人以为漏配了。
+            但**库里已经存着密钥时照样要显示**：从 OpenAI 切到 Ollama 的用户否则
+            既看不到「这台机器上存着一份凭证」的提醒，也没有清除它的入口。 */}
+        {form.provider === 'openai' || form.apiKeySet ? (
           <>
             <p className="settings-hint">
               API Key：{form.apiKeySet ? '已设置（留空则不修改）' : '未设置'}
+              {form.provider === 'ollama' ? '。Ollama 不需要密钥，可以清除。' : ''}
             </p>
             <div className="ai-field">
               <span className="ai-field-label">API Key</span>
