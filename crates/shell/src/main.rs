@@ -126,6 +126,23 @@ fn main() {
             commands::set_capture_hotkey,
             commands::set_hide_dock_icon,
             commands::set_autostart,
+            // AI。这 13 个必须和 commands.rs 里的 `ai_*` 命令一一对上：
+            // MVP 阶段有四个命令写完了却没写进这张表，前端调过去只得到
+            // 「Command xxx not found」，直到 Playwright 跑起来才发现。
+            // `e2e/contract.spec.ts` 现在会守住这条。
+            commands::ai_status,
+            commands::ai_enable,
+            commands::ai_test_connection,
+            commands::ai_reindex_all,
+            commands::ai_retry_failed,
+            commands::ai_ask,
+            commands::ai_cancel,
+            commands::ai_semantic_search,
+            commands::ai_list_conversations,
+            commands::ai_create_conversation,
+            commands::ai_get_messages,
+            commands::ai_delete_conversation,
+            commands::ai_rename_conversation,
         ])
         // 用 build + run 而不是一步到位的 run(context)：只有 `App::run` 这条路
         // 能拿到 `RunEvent` 回调，而 Dock 唤起（macOS 的 Reopen）就藏在里面。

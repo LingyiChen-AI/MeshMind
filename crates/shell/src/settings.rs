@@ -30,9 +30,8 @@ pub const KEY_AI_EMBED_MODEL: &str = "ai.embed_model";
 pub const KEY_AI_TOP_K: &str = "ai.top_k";
 
 /// `get_settings` 返回值里代替 `ai.api_key` 的那个键，值为 `"true"` / `"false"`。
-/// 它**不在** `ALLOWED_KEYS` 里——前端不能写它，它是读取时合成出来的。
-// 合成它的 get_settings 改造还没落地（命令层那一步），先压掉 dead_code。
-#[allow(dead_code)]
+/// 它**不在** `ALLOWED_KEYS` 里——前端不能写它，它是读取时由
+/// [`crate::commands::redact_settings`] 合成出来的。
 pub const KEY_AI_API_KEY_SET: &str = "ai.api_key_set";
 
 /// 允许写入 settings 表的全部键名。
