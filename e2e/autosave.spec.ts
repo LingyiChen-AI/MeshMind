@@ -156,28 +156,81 @@ test('保存很慢时不会并发写同一条笔记', async ({ page }) => {
   expect(stored?.body_text).toContain('第一批')
 })
 
+/// 保存失败后的重试退避档位，抄自 App.tsx 的 `SAVE_RETRY_BASE_MS`。
+/// 「一次都没重试」这种断言必须等过这个窗口才算数，否则等于什么都没验。
+const SAVE_RETRY_BASE_MS = 1_500
+
 test('删掉正在保存的那条笔记，不会把它又写回去', async ({ page }) => {
   test.slow()
 
   const mock = await openApp(page, { notes: [note(1, '要删掉的')] })
 
   await page.locator('.note-item', { hasText: '要删掉的' }).click()
-  await mock.setDelay('update_note', 1_000)
+  // 在途窗口开到 2 秒。这条测试要构造的是「删除发生在保存落地之前」，
+  // 窗口越窄越靠运气——原来是 1 秒，macOS CI 上偶尔就先失败后删除了。
+  await mock.setDelay('update_note', 2_000)
   await mock.failCommand('update_note', '数据库错误: disk I/O error')
   await typeInEditor(page, '编辑中')
 
-  // 等这次保存发出去（它会在 1 秒后失败）
+  // 等到这次保存**发出去并且还在途中**（settledAt 仍是 null）。
+  //
+  // 原来只等「发出去了」，而 expect.poll 的默认间隔是 100/250/500/1000ms：
+  // 防抖稍微晚一点点撞过某个刻度，下一次回头看就是将近一秒之后——那时保存
+  // 已经失败落地，abandonedRef 那条路根本没走到，测的就成了另一个场景
+  // （先失败后删除：红条弹出来，而删除又顺手取消了重试定时器，
+  // 于是「只调用一次」照样成立、只有 `.error-bar` 那条红——正是 CI 上看到的样子）。
   await expect
-    .poll(async () => (await mock.callsTo('update_note')).length, { timeout: 5_000 })
-    .toBe(1)
+    .poll(
+      async () => {
+        const [first] = await mock.callsTo('update_note')
+        return first === undefined ? '还没发出去' : first.settledAt === null ? '在途' : '已落地'
+      },
+      { timeout: 10_000, intervals: [50] },
+    )
+    .toBe('在途')
 
   // 在途期间把这条笔记删掉。列表上的标题仍是「要删掉的」——那次保存失败了，
   // 列表压根没重拉过，这本身就是「保存失败时界面不许假装存上了」的一个侧证。
   await page.locator('.note-item', { hasText: '要删掉的' }).getByRole('button').click()
   await expect(page.locator('.note-item')).toHaveCount(0)
 
+  const [save] = await mock.callsTo('update_note')
+  const [remove] = await mock.callsTo('delete_note')
+
+  // 前提复核。这不是被守的行为，是这条测试成立的前提：删除必须发生在那次保存
+  // 落地之前。前提没成立时下面两条断言验的是另一个场景，与其让它们以「红条不该在」
+  // 这种看不出所以然的方式红掉，不如在这里把话说明白。
+  expect(remove, '删除请求没发出去，前提就不成立').toBeDefined()
+  expect(
+    save?.settledAt === null || (save?.settledAt ?? 0) > (remove?.startedAt ?? 0),
+    '删除必须发生在那次保存落地之前，否则构造出来的是「先失败后删除」，不是本测试的场景',
+  ).toBe(true)
+
+  // 等那次保存真的**失败落地**——mock 只在结果落地时才写 settledAt，
+  // 它从 null 变成数字的那一刻，就是 reject 递到应用手里的那一刻。
+  // 比「大概过了几秒」精确，机器快慢也影响不到。
+  await expect
+    .poll(async () => (await mock.callsTo('update_note'))[0]?.settledAt, {
+      timeout: 15_000,
+      intervals: [50],
+    })
+    .not.toBeNull()
+
+  // 失败已经递到应用手里了。走错路的实现会做两件事：把错误摆上红条（同步 setState，
+  // 一个渲染 tick 就到），并按 SAVE_RETRY_BASE_MS 排一次重试（1.5 秒后）。
+  //
+  // 「不该发生的事」没有可以 poll 的正向信号，只能把那个窗口走完再看。但等待不再是
+  // 拍脑袋的 4 秒墙钟：起点是上面确认过的「失败已落地」，长度来自应用自己的退避常量，
+  // 而且走的是**页面自己的时钟**（performance.now()，和 mock 记 settledAt、
+  // 和重试的 setTimeout 用的是同一把尺子）——页面被卡住时这个等待跟着一起延后，
+  // 不会出现「测试等够了、页面其实还没走到」这种慢机器上的假绿。
+  const failedAt = (await mock.callsTo('update_note'))[0]?.settledAt ?? 0
+  await page.waitForFunction(
+    (deadline) => performance.now() >= deadline,
+    failedAt + SAVE_RETRY_BASE_MS * 2,
+  )
+
   // 失败的那次不该被重试到一条已经不存在的笔记上，也不该弹红条吓人
-  await page.waitForTimeout(4_000)
   expect(await mock.callsTo('update_note')).toHaveLength(1)
   await expect(page.locator('.error-bar')).toHaveCount(0)
 })
