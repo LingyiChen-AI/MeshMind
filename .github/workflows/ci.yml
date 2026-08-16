@@ -124,8 +124,16 @@ jobs:
       # 取舍：PR 上只跑测试与 lint（快速反馈），打包放到 push 到 main
       # 和手动触发（workflow_dispatch）时跑，保证 main 始终是可出包的。
       # 如果某个 PR 确实改了打包相关配置，用 workflow_dispatch 手动跑一次即可。
+      # 一旦 tauri.conf.json 里有 plugins.updater.pubkey 且开了 createUpdaterArtifacts，
+      # 打包就必须能拿到私钥，否则直接失败：
+      #   A public key has been found, but no private key.
+      # 这个失败只在打包步骤出现，cargo build 和全部测试都照常绿——
+      # 所以改了更新器配置之后一定要等一次完整的 CI，别推完就走。
       - name: 打包安装程序
         if: github.event_name != 'pull_request'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --bundles ${{ matrix.bundles }}
 
       - name: 上传安装包
@@ -133,8 +141,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: meshmind-${{ matrix.os }}
+          # 更新包与 .sig 也一起传：签名有没有真的生效，只有产物列表能证明。
+          # 不传的话，「少了 .sig」这种问题要等发版当天才暴露，
+          # 而那时客户端已经装上了一个永远收不到更新的包。
           path: |
             target/release/bundle/dmg/*.dmg
             target/release/bundle/msi/*.msi
+            target/release/bundle/macos/*.app.tar.gz*
+            target/release/bundle/msi/*.msi.zip*
           if-no-files-found: warn
           retention-days: 7
