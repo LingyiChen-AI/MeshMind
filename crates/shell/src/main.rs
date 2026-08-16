@@ -33,19 +33,14 @@ fn main() {
         ))
         // 更新器：前端启动时静默查一次、设置面板里可以手动查。
         //
-        // ⚠ `tauri.conf.json` 里还差两处配置，等更新器密钥生成之后一起补：
+        // `tauri.conf.json` 里与之配套的两处配置已经就位：顶层 `plugins.updater`
+        // （endpoints 指向 GitHub Release 的 latest.json，pubkey 是签名公钥）
+        // 与 `bundle.createUpdaterArtifacts: true`。
         //
-        //   1. 顶层 `plugins.updater`：`endpoints`（GitHub Release 的 latest.json）
-        //      与 `pubkey`（`tauri signer generate` 出来的公钥原文）。
-        //   2. `bundle.createUpdaterArtifacts: true`。
-        //
-        // 两者必须同时存在：只开 `createUpdaterArtifacts` 而没有 `plugins.updater`，
-        // 打包会在「Built application」之后直接失败，报
-        // `failed to get updater configuration: plugins > updater doesn't exist`
-        // ——这是发版当天才会撞上的那种失败，所以在这里留一笔。
-        //
-        // 缺配置期间插件照常编译与注册，只是运行时 `check()` 会报错。前端已经按这个
-        // 前提写好了：启动时的失败咽掉、只 console.warn，手动检查把错误摆到面板上。
+        // 两者必须同时存在，改动时别只动一个：只开 `createUpdaterArtifacts` 而没有
+        // `plugins.updater`，打包会在「Built application」之后直接失败，报
+        // `failed to get updater configuration: plugins > updater doesn't exist`。
+        // 这个失败 cargo build 与本地测试都发现不了，只有真打包才会撞上。
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 更新装完要重启应用才生效，relaunch() 在这个插件里。
         .plugin(tauri_plugin_process::init())
