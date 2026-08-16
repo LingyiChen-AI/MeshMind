@@ -618,3 +618,62 @@ fn all_with_counts_is_empty_when_nothing_is_tagged() {
     seed(&mut conn, "没有标签的笔记", 1_000);
     assert!(notes::tags::all_with_counts(&conn).unwrap().is_empty());
 }
+
+/// 新建笔记必须入队，否则它永远不会被向量化，而且没有任何人会发现。
+#[test]
+fn creating_a_note_enqueues_it_for_embedding() {
+    let mut conn = test_conn();
+
+    let note = notes::create(&mut conn, &new("内容"), 1_000).unwrap();
+
+    let queued: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM embed_queue WHERE note_id = ?1",
+            [note.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 1);
+}
+
+/// 更新同样要入队——正文变了，旧向量就过期了。
+#[test]
+fn updating_a_note_reenqueues_it() {
+    let mut conn = test_conn();
+    let note = notes::create(&mut conn, &new("旧内容"), 1_000).unwrap();
+    conn.execute("DELETE FROM embed_queue", []).unwrap();
+
+    notes::update(&mut conn, note.id, &doc("新内容"), &[], 2_000).unwrap();
+
+    let queued: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM embed_queue WHERE note_id = ?1",
+            [note.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 1);
+}
+
+/// 入队与笔记写入必须在同一事务里。笔记写成功而入队失败的话，
+/// 会留下一篇永远不被索引的笔记——而且是静默的。
+///
+/// 只有「入队本身失败」能区分两种写法：用附件不存在之类的失败点是测不出来的，
+/// 那一步在入队之前就返回了，入队写在事务内还是提交后队列都同样是空的。
+/// 所以这里直接把队列表拿掉，制造一个必然发生在入队那一步的失败。
+#[test]
+fn the_note_and_its_queue_entry_are_written_atomically() {
+    let mut conn = test_conn();
+    conn.execute("DROP TABLE embed_queue", []).unwrap();
+
+    let failed = notes::create(&mut conn, &new("内容"), 1_000);
+    assert!(failed.is_err(), "入队失败必须让整个创建失败");
+
+    let stored: i64 = conn
+        .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        stored, 0,
+        "入队失败了笔记却留了下来——它将永远不被索引，且没有任何信号能暴露它"
+    );
+}

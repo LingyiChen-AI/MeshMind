@@ -60,6 +60,10 @@ pub fn create(conn: &mut Connection, new: &NewNote, now: i64) -> Result<Note> {
     write_index(&tx, id, &title, &body_text)?;
     tags::attach(&tx, id, &tag_names)?;
     link_attachments(&tx, id, &new.attachment_ids)?;
+    // 入队等待向量化。放在同一事务里：笔记写成功而入队失败的话，
+    // 会留下一篇永远不被索引的笔记，且没有任何信号能暴露它。
+    // 不判断 AI 开关——core 不该知道那件事，而一行队列记录只有几十字节。
+    crate::ai::index::enqueue(&tx, id, now)?;
     tx.commit()?;
 
     let mut sorted_tags = tag_names;
@@ -294,6 +298,8 @@ pub fn update(
         params![id],
     )?;
     link_attachments(&tx, id, attachment_ids)?;
+    // 正文变了旧向量就过期了，和创建时同样在事务内重新入队。
+    crate::ai::index::enqueue(&tx, id, now)?;
     tx.commit()?;
 
     get(conn, id)
