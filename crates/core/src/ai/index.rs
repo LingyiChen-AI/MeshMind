@@ -542,6 +542,8 @@ mod tests {
         let alive = note(&mut conn, "活着");
         let dead = note(&mut conn, "删了");
         notes::soft_delete(&mut conn, dead, 2_000).unwrap();
+        // 建笔记本身就会入队，先清空，这条测的是 enqueue_all 自己挑了谁。
+        conn.execute("DELETE FROM embed_queue", []).unwrap();
 
         let n = enqueue_all(&conn, 3_000).unwrap();
         assert_eq!(n, 1);
