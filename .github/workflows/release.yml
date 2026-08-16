@@ -1,7 +1,11 @@
 name: Release
 
-# 发版后务必确认 `gh release view <tag>` 的附件里同时有
-# .dmg / .app.tar.gz / .app.tar.gz.sig 与 .msi / .msi.zip / .msi.zip.sig，以及 latest.json。
+# 发版后务必确认 `gh release view <tag>` 的附件齐全。两个平台的更新产物形态不同：
+#   macOS   → .dmg + MeshMind.app.tar.gz + MeshMind.app.tar.gz.sig
+#   Windows → .msi + MeshMind_x.y.z_x64_en-US.msi.sig
+#             （Tauri 2.11 直接给 .msi 签名，没有 .msi.zip 那层壳。
+#              按 .msi.zip 去找会一个都找不到，从而误判成签名没生效。）
+# 外加 latest.json。
 # 缺 .sig 说明签名没生效（多半是 secret 没设或设错），
 # 那会出一个「装得上但永远收不到更新」的包——客户端把无签名当校验失败直接拒绝安装。
 #

@@ -144,10 +144,16 @@ jobs:
           # 更新包与 .sig 也一起传：签名有没有真的生效，只有产物列表能证明。
           # 不传的话，「少了 .sig」这种问题要等发版当天才暴露，
           # 而那时客户端已经装上了一个永远收不到更新的包。
+          #
+          # 两个平台的更新产物形态不一样，别想当然：
+          #   macOS   → MeshMind.app.tar.gz + .sig（更新包是 .app 打的 tar.gz）
+          #   Windows → MeshMind_x.y.z_x64_en-US.msi.sig（Tauri 2.11 直接给 .msi 签名，
+          #             没有 .msi.zip 那层壳；按 *.msi.zip* 去捞会一个都捞不到）
           path: |
             target/release/bundle/dmg/*.dmg
             target/release/bundle/msi/*.msi
-            target/release/bundle/macos/*.app.tar.gz*
-            target/release/bundle/msi/*.msi.zip*
+            target/release/bundle/msi/*.msi.sig
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: warn
           retention-days: 7
