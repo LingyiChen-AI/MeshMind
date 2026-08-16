@@ -1,4 +1,4 @@
-import type { MockInit } from './state'
+import type { MockChatMessage, MockCitation, MockInit } from './state'
 
 /// 在应用加载前顶替 `window.__TAURI_INTERNALS__`，用一份内存假实现冒充 Rust 外壳。
 ///
@@ -24,6 +24,13 @@ import type { MockInit } from './state'
 ///    （`macos.hide_dock_icon`，含点号，不该被 camel 化）。
 /// 3. 失败时 reject 的是**裸字符串**，不是 Error 对象——真实 `CommandError`
 ///    就是这么序列化的，前端各处 `String(err)` 拿到的就是那句中文。
+/// 4. `AskEvent` 照 serde 的**外部标签**写：有字段的变体是单键对象
+///    （`{ Delta: { text } }`、`{ Done: { message_id } }`），无字段的 `Cancelled`
+///    是**裸字符串**。这条路径不经过 `toCamel`，`message_id` / `note_id` 写成
+///    camelCase 的话前端一条都匹配不上，界面安静地什么都不显示、还不报错。
+/// 5. `get_settings` 要照 `redact_settings` 那样**把 `ai.api_key` 摘掉、换成合成的
+///    `ai.api_key_set`**。原样吐回密钥的话，「密钥永远不经 IPC 回到 webview」
+///    这条约束就没人守了，而且设置面板读的是那个合成键，不摆出来它永远显示「未设置」。
 ///
 /// ## `__TAURI_INTERNALS__` 的形状按 @tauri-apps/api 2.11.1 的源码对齐
 ///
@@ -62,7 +69,25 @@ export function installMock(init: MockInit): void {
     attachment_ids: number[]
   }
 
+  /// 一次在飞的提问。`ai_ask` 开一条，测试用 `emitAsk` 往里投事件。
+  interface AskSession {
+    /// Channel 构造时从 transformCallback 拿到的回调 id
+    callbackId: number
+    conversationId: number
+    /// 下一个信封的序号。Channel 内部靠它保序，跳号的消息会被永远压在队列里
+    index: number
+    /// 已经投出去的 Delta 拼起来。`Done` 时按真实实现落库
+    answer: string
+    citations: MockCitation[]
+    /// 终止事件已经发过了。真实实现里那之后 Tauri 会把回调注销
+    ended: boolean
+  }
+
   const initial = init.notes.map((n) => ({ ...n }))
+
+  // 深拷一份：假实现会就地改它（新建会话、落库消息、改 pendingNotes），
+  // 而 init 是注入进来的那份初始数据，改它等于让「初始状态」随测试跑动而漂移。
+  const ai = JSON.parse(JSON.stringify(init.ai)) as MockInit['ai']
 
   const state = {
     notes: initial as Note[],
@@ -83,6 +108,16 @@ export function installMock(init: MockInit): void {
     listeners: new Map<number, string>(),
     callbacks: new Map<number, (payload: unknown) => void>(),
     nextCallbackId: 1,
+    ai,
+    // 按 `ai_ask` 的调用顺序排。测试用下标指定「投给第几次提问的那条 channel」——
+    // 「上一次提问的取消事件迟到了」这种场景没有下标就构造不出来。
+    asks: [] as AskSession[],
+    nextConversationId:
+      ai.conversations.reduce((max, c) => Math.max(max, c.id), 0) + 1,
+    nextMessageId:
+      Object.values(ai.messages)
+        .flat()
+        .reduce((max, m) => Math.max(max, m.id), 0) + 1,
   }
 
   // 跨 page 的事件通道。两个窗口是两个独立的 page，内存不共享，
@@ -107,6 +142,64 @@ export function installMock(init: MockInit): void {
     },
     setSearchHits: (hits: unknown) => {
       state.searchHits = hits as MockInit['searchHits']
+    },
+    setSemanticHits: (hits: unknown) => {
+      state.ai.semanticHits = hits as MockInit['ai']['semanticHits']
+    },
+    /// 把一个 `AskEvent` 投给第 `which` 次 `ai_ask` 开出来的 channel（null = 最后一次）。
+    ///
+    /// **信封是 `{ index, message }`，index 从 0 起严格递增。** 这不是可有可无的包装：
+    /// `Channel` 登记进 `transformCallback` 的**不是**调用方给的 `onmessage`，
+    /// 而是它内部的一个保序泵（见 @tauri-apps/api 2.11.1 的 core.js）。泵收到的
+    /// index 和它期待的对不上就压进 `pendingMessages` 里等着，`onmessage` 一次都不会
+    /// 触发。直接投裸 `AskEvent` 的话面板永远空白，**而且不报任何错**——
+    /// 假实现全绿、应用是坏的，正是这份文件顶上那段纪律要防的东西。
+    emitAsk: (event: unknown, which: number | null) => {
+      const session = which === null ? state.asks[state.asks.length - 1] : state.asks[which]
+      // 抛而不是静默返回。投不出去只有两种原因：前端根本没发 `ai_ask`，
+      // 或者这条 channel 已经结束了——两种都该让用例当场红掉。
+      if (session === undefined) throw new Error('还没有第 ' + String(which) + ' 条 ai_ask channel')
+      if (session.ended) throw new Error('这条 channel 已经收过终止事件，Tauri 早把它注销了')
+      const callback = state.callbacks.get(session.callbackId)
+      if (callback === undefined) throw new Error('channel 的回调已经不在了')
+
+      let terminal = event === 'Cancelled'
+      if (typeof event === 'object' && event !== null) {
+        // 摊平成「四个键都可选」：`Partial<联合类型>` 会按分支分配，
+        // 每个分支都只认得自己那一个键，取别的键就成了类型错误。
+        const body = event as {
+          Retrieved?: { citations: MockCitation[] }
+          Delta?: { text: string }
+          Done?: { message_id: number }
+          Failed?: { message: string }
+        }
+        if (body.Retrieved) session.citations = body.Retrieved.citations
+        if (body.Delta) session.answer += body.Delta.text
+        if (body.Failed) terminal = true
+        if (body.Done) {
+          terminal = true
+          // 真实实现在发 `Done` **之前**就把回答落库了（ask.rs：append_assistant
+          // 拿到 id，再 send(Done { message_id })）。顺序反过来的话，前端收到 Done
+          // 立刻重拉消息，会拉到一个还没有助手回答的会话，屏幕上闪一下空白。
+          // 失败与取消不落库——「半截回答不该留在消息流里」那条用例守的就是这个。
+          appendMessage(
+            session.conversationId,
+            'assistant',
+            session.answer,
+            session.citations,
+            body.Done.message_id,
+          )
+        }
+      }
+
+      callback({ index: session.index++, message: event })
+
+      if (terminal) {
+        session.ended = true
+        // Rust 侧的 `Channel` 在提问线程结束时被丢弃，Tauri 随即补一个
+        // `{ end: true, index }`（index 等于已发条数），JS 侧收到它才 unregisterCallback。
+        callback({ index: session.index++, end: true })
+      }
     },
     // 页面加载之后才让更新源「上新」，这样查到的那一次只可能来自手动检查——
     // 启动那次早就跑完并且返回了 null。
@@ -215,6 +308,73 @@ export function installMock(init: MockInit): void {
     // CoreError::NoteNotFound 的 Display 就是这句
     if (!target) throw `笔记不存在: ${String(args.id)}`
     return target
+  }
+
+  // ---------- AI ----------
+  //
+  // 开关与配置完整性一律**从 settings 派生**，和真实后端一个来源
+  // （`config::is_enabled` / `config::load` / `config::missing`）。
+  // 摆成两个独立的布尔的话，`ai_enable` 只写了库却没让状态跟着变这类缺陷
+  // 在测试里完全看不见——而那正是「开关看着是开的，一篇笔记都不会被索引」的样子。
+
+  /// 会话默认标题（`chat::UNTITLED`）。首个提问会把它改写成问题本身。
+  const UNTITLED = '新对话'
+  /// 标题最多取问题的前几个字（`chat::TITLE_MAX_CHARS`）。
+  const TITLE_MAX_CHARS = 30
+
+  function aiSetting(key: string): string {
+    return (state.settings[key] ?? '').trim()
+  }
+
+  /// `settings::read_bool` 比的是**没 trim 过的原值**，这里照做。
+  function aiIsEnabled(): boolean {
+    return state.settings['ai.enabled'] === 'true'
+  }
+
+  /// 照抄 `crates/shell/src/ai/config.rs` 的 `missing`，**包括判断顺序**——
+  /// 引导页上「还缺：X」显示的就是第一个不满足的那一项。
+  /// Ollama 走本机，没有密钥这回事，所以它不检查 API Key。
+  function aiMissing(): string | null {
+    if (aiSetting('ai.base_url') === '') return 'Base URL'
+    if (aiSetting('ai.chat_model') === '') return '对话模型'
+    if (aiSetting('ai.embed_model') === '') return 'Embedding 模型'
+    if (aiSetting('ai.provider') !== 'ollama' && aiSetting('ai.api_key') === '') return 'API Key'
+    return null
+  }
+
+  /// 追加一条消息，并按 `chat::insert` 的两个副作用同步会话：顶起 `updated_at`
+  /// （不然会话列表的排序永远停在创建时刻），首个提问改写标题（之后不再改）。
+  function appendMessage(
+    conversationId: number,
+    role: 'user' | 'assistant',
+    content: string,
+    citations: MockCitation[],
+    forcedId?: number,
+  ): number {
+    const target = state.ai.conversations.find((c) => c.id === conversationId)
+    // CoreError::ConversationNotFound 的 Display 就是这句
+    if (!target) throw `对话不存在: ${String(conversationId)}`
+    const id = forcedId ?? state.nextMessageId
+    state.nextMessageId = Math.max(state.nextMessageId, id + 1)
+    const now = state.clock++
+    const bucket = state.ai.messages[String(conversationId)] ?? []
+    state.ai.messages[String(conversationId)] = bucket
+    bucket.push({ id, role, content, citations: citations.map((c) => ({ ...c })), created_at: now })
+    target.updated_at = now
+    if (role === 'user' && target.title === UNTITLED) {
+      target.title = [...content].slice(0, TITLE_MAX_CHARS).join('')
+    }
+    return id
+  }
+
+  /// 照抄 `commands::redact_settings`：把 `ai.api_key` 摘掉，换成合成的
+  /// `ai.api_key_set`。密钥只有一条单向的写入路径，永远不经 IPC 回到 webview。
+  function redactSettings(): Record<string, string> {
+    const out = { ...state.settings }
+    const has = (out['ai.api_key'] ?? '').trim() !== ''
+    delete out['ai.api_key']
+    out['ai.api_key_set'] = has ? 'true' : 'false'
+    return out
   }
 
   function toArrayBuffer(bytes: number[]): ArrayBuffer {
@@ -407,7 +567,8 @@ export function installMock(init: MockInit): void {
       case 'get_settings':
         // 键是设置项名（含点号），真实前端刻意绕开 toCamel——camel 化之后
         // `macos.hide_dock_icon` 会变成 `macos.hideDockIcon`，取值全是 undefined。
-        return { ...state.settings }
+        // 密钥不在返回值里，换成合成的 `ai.api_key_set`（见 redactSettings）。
+        return redactSettings()
 
       case 'set_setting':
         state.settings[String(args.key)] = String(args.value)
@@ -424,6 +585,127 @@ export function installMock(init: MockInit): void {
       case 'set_autostart':
         state.settings['startup.autostart'] = args.enabled ? 'true' : 'false'
         return null
+
+      // ---------- AI ----------
+
+      case 'ai_status': {
+        const missing = aiMissing()
+        return {
+          enabled: aiIsEnabled(),
+          configured: missing === null,
+          missing_field: missing,
+          pending_notes: state.ai.pendingNotes,
+          indexed_chunks: state.ai.indexedChunks,
+          memory_bytes: state.ai.memoryBytes,
+          dim_mismatches: state.ai.dimMismatches,
+          last_error: state.ai.lastError,
+        }
+      }
+
+      case 'ai_preview_index':
+        // **只读**（真实实现是 index::indexable_note_count）：不写设置、不入队、
+        // 不起线程、不发一个模型请求。「确认框点取消，一个调用都没发」这条用例
+        // 守的就是它确实什么都没改。
+        return { pending_notes: live().length }
+
+      case 'ai_enable': {
+        const enabled = args.enabled === true
+        state.settings['ai.enabled'] = enabled ? 'true' : 'false'
+        // 置真时全量入队（enqueue_all）：之前写的笔记一篇都没被向量化过。
+        // 关闭时队列原样留着，返回的还是当前待索引篇数。
+        if (enabled) state.ai.pendingNotes = live().length
+        return { pending_notes: state.ai.pendingNotes }
+      }
+
+      case 'ai_test_connection':
+        return { ...state.ai.connection }
+
+      case 'ai_reindex_all':
+        // 裸数字，不是对象：清空旧向量并全量入队，返回入队篇数。
+        state.ai.pendingNotes = live().length
+        state.ai.indexedChunks = 0
+        state.ai.dimMismatches = 0
+        return state.ai.pendingNotes
+
+      case 'ai_retry_failed': {
+        const reset = state.ai.failedNotes
+        state.ai.failedNotes = 0
+        state.ai.pendingNotes += reset
+        state.ai.lastError = null
+        return reset
+      }
+
+      case 'ai_ask': {
+        const conversationId = Number(args.conversationId)
+        // Channel 在**构造时**就把自己登记进了 transformCallback，这里拿到的
+        // 就是那个 id。序列化成 `__CHANNEL__:<id>` 的是它的 toJSON，
+        // 而 handle 收到的是没被序列化过的原始对象。
+        const onEvent = args.onEvent as { id: number } | undefined
+        if (onEvent === undefined) throw 'ai_ask 没有收到 onEvent 通道'
+        // 真实实现**先落库再检索**：用户敲的那句话在任何事件到达之前就已经在库里了。
+        // 所以失败或取消之后重拉消息，提问仍在——有用例守着这一条。
+        appendMessage(conversationId, 'user', String(args.question), [])
+        state.asks.push({
+          callbackId: onEvent.id,
+          conversationId,
+          index: 0,
+          answer: '',
+          citations: [],
+          ended: false,
+        })
+        // 命令立刻返回，答案全部走 channel。它落定**不代表回答结束**。
+        return null
+      }
+
+      case 'ai_cancel':
+        // 真实实现只是把取消标志置起来；`Cancelled` 事件仍由那条 channel 补发，
+        // 而且可能迟到。所以这里什么都不投。
+        return null
+
+      case 'ai_semantic_search': {
+        const query = String(args.query ?? '').trim()
+        const limit = Number(args.limit ?? 0)
+        // AI 没开、没配全、查询为空、limit 为 0 时返回**空数组而不是错误**——
+        // 搜索框每敲一个键都会调它，为一个本来就没开的功能弹红色横幅不可接受。
+        if (!aiIsEnabled() || aiMissing() !== null || query === '' || limit === 0) return []
+        return state.ai.semanticHits.slice(0, limit)
+      }
+
+      case 'ai_list_conversations':
+        // ORDER BY updated_at DESC, id DESC
+        return slice(
+          [...state.ai.conversations].sort((a, b) => b.updated_at - a.updated_at || b.id - a.id),
+          args,
+        ).map((c) => ({ ...c }))
+
+      case 'ai_create_conversation': {
+        const id = state.nextConversationId++
+        const now = state.clock++
+        state.ai.conversations.push({ id, title: UNTITLED, created_at: now, updated_at: now })
+        state.ai.messages[String(id)] = []
+        // 裸数字：新会话的 id
+        return id
+      }
+
+      case 'ai_get_messages':
+        // 按时间升序；没有引用时是 `[]` 而不是 null。
+        return (state.ai.messages[String(Number(args.conversationId))] ?? []).map(
+          (m: MockChatMessage) => ({ ...m, citations: m.citations.map((c) => ({ ...c })) }),
+        )
+
+      case 'ai_delete_conversation': {
+        const id = Number(args.id)
+        state.ai.conversations = state.ai.conversations.filter((c) => c.id !== id)
+        delete state.ai.messages[String(id)]
+        return null
+      }
+
+      case 'ai_rename_conversation': {
+        const target = state.ai.conversations.find((c) => c.id === Number(args.id))
+        if (!target) throw `对话不存在: ${String(args.id)}`
+        target.title = String(args.title)
+        return null
+      }
 
       // ---------- 更新器 ----------
       //

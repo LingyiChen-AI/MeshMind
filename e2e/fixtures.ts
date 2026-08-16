@@ -7,7 +7,14 @@
 import { test as base, type Page } from '@playwright/test'
 
 import { installMock } from './mock/install'
-import { initialState, type MockInit, type MockSearchHit, type MockUpdate } from './mock/state'
+import {
+  initialState,
+  type MockAskEvent,
+  type MockInit,
+  type MockSearchHit,
+  type MockSemanticHit,
+  type MockUpdate,
+} from './mock/state'
 
 export interface IpcCall {
   cmd: string
@@ -38,6 +45,8 @@ interface MockBridge {
   clearFailure(cmd: string): void
   setDelay(cmd: string, ms: number): void
   setSearchHits(hits: MockSearchHit[] | null): void
+  setSemanticHits(hits: MockSemanticHit[]): void
+  emitAsk(event: MockAskEvent, which: number | null): void
   setUpdate(update: MockUpdate | null): void
   notes(): unknown[]
   settings(): Record<string, string>
@@ -47,6 +56,9 @@ export interface MockHandle {
   /// 迄今为止的全部 invoke，按发生顺序。顺序本身常常就是断言的内容
   /// （比如「退出前必须先落盘再回执」）。
   calls(): Promise<IpcCall[]>
+  /// 忘掉迄今为止记下的调用。「从这一刻起一个调用都不该发」这类断言靠它写成
+  /// `expect(await mock.calls()).toEqual([])`，比记住基线数字再做减法可靠。
+  reset(): Promise<void>
   /// 只看某个命令的调用
   callsTo(cmd: string): Promise<IpcCall[]>
   /// 某个命令最后一次调用的参数，一次都没调过则返回 null
@@ -56,6 +68,17 @@ export interface MockHandle {
   setDelay(cmd: string, ms: number): Promise<void>
   /// 写死 search_notes 的返回，用来精确构造 matched_terms / source 的组合
   setSearchHits(hits: MockSearchHit[] | null): Promise<void>
+  /// 写死 ai_semantic_search 的返回。AI 没开 / 没配全时假实现照样返回 `[]`，
+  /// 摆了数据也不会漏出来——这一点和真实后端一致。
+  setSemanticHits(hits: MockSemanticHit[]): Promise<void>
+  /// 往一次提问的 channel 上投一个事件。`which` 是 `ai_ask` 的第几次调用
+  /// （0 起），省略则投给最后一次。
+  ///
+  /// 事件会被包成 Channel 要的 `{ index, message }` 信封（index 由假实现自己
+  /// 维护）。终止事件之后假实现还会补一个 `{ index, end: true }`，
+  /// 和 Rust 侧 Channel 被丢弃时的行为一致——所以同一条 channel 收过
+  /// Done / Failed / Cancelled 之后再投就会抛。
+  emitAsk(event: MockAskEvent, which?: number): Promise<void>
   /// 让更新源「上新」或者「下架」。页面加载之后才调的话，
   /// 启动那次静默检查已经跑完了，之后查到的只可能来自手动检查。
   setUpdate(update: MockUpdate | null): Promise<void>
@@ -69,6 +92,11 @@ function handleFor(page: Page): MockHandle {
     calls: () =>
       page.evaluate(
         () => (window as unknown as { __IPC_MOCK__: MockBridge }).__IPC_MOCK__.calls() as IpcCall[],
+      ),
+
+    reset: () =>
+      page.evaluate(() =>
+        (window as unknown as { __IPC_MOCK__: MockBridge }).__IPC_MOCK__.reset(),
       ),
 
     async callsTo(cmd) {
@@ -114,6 +142,25 @@ function handleFor(page: Page): MockHandle {
             h as MockSearchHit[] | null,
           ),
         hits,
+      ),
+
+    setSemanticHits: (hits) =>
+      page.evaluate(
+        (h) =>
+          (window as unknown as { __IPC_MOCK__: MockBridge }).__IPC_MOCK__.setSemanticHits(
+            h as MockSemanticHit[],
+          ),
+        hits,
+      ),
+
+    emitAsk: (event, which) =>
+      page.evaluate(
+        (payload) =>
+          (window as unknown as { __IPC_MOCK__: MockBridge }).__IPC_MOCK__.emitAsk(
+            payload.event as MockAskEvent,
+            payload.which,
+          ),
+        { event, which: which ?? null } as { event: MockAskEvent; which: number | null },
       ),
 
     setUpdate: (update) =>

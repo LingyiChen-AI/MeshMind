@@ -33,6 +33,99 @@ export interface MockUpdate {
   chunkDelayMs: number
 }
 
+/// 一条引用，字段名照抄 Rust 的 `Citation`。
+///
+/// **是 `note_id` 不是 `noteId`**。这个结构体走两条路回到前端：命令返回值那条
+/// 被 `toCamel` 洗过，Channel 那条**没人洗**。假实现里图省事写成 camelCase，
+/// 等于替 `lib/ai.ts` 的 `normalizeCitation` 把活先干了——它写错的时候
+/// （点引用跳到一篇 id 为 undefined 的笔记上，已经真实发生过一次）测试照样全绿。
+export interface MockCitation {
+  /// 与回答正文里 `[n]` 的编号一致，从 1 起
+  index: number
+  note_id: number
+  uuid: string
+  title: string
+  heading: string
+  excerpt: string
+}
+
+/// 一条会话消息，字段名照抄 Rust 的 `ChatMessage`。
+export interface MockChatMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  citations: MockCitation[]
+  created_at: number
+}
+
+/// 一个会话，字段名照抄 Rust 的 `Conversation`。
+export interface MockConversation {
+  id: number
+  title: string
+  created_at: number
+  updated_at: number
+}
+
+/// 一条语义检索结果，字段名照抄 Rust 的 `SemanticHit`。
+export interface MockSemanticHit {
+  note_id: number
+  uuid: string
+  title: string
+  excerpt: string
+  score: number
+}
+
+/// `ai_test_connection` 的回执，字段名照抄 Rust 的 `ConnectionReport`。
+export interface MockConnectionReport {
+  embed_ok: boolean
+  /// embedding 的维度，不通时为 null
+  embed_dim: number | null
+  chat_ok: boolean
+  error: string | null
+}
+
+/// `AskEvent` 的 JSON 形状。serde 的默认外部标签把有字段的变体序列化成单键对象，
+/// **无字段的 `Cancelled` 则是裸字符串**——照抄 `crates/shell/src/ai/ask.rs`。
+///
+/// 写成 `{ Cancelled: {} }` 或者把 `message_id` 写成 `messageId`，前端的
+/// `reduceAsk` 会一条都匹配不上，界面安静地什么都不显示、也不报错。
+export type MockAskEvent =
+  | { Retrieved: { citations: MockCitation[] } }
+  | { Delta: { text: string } }
+  | { Done: { message_id: number } }
+  | { Failed: { message: string } }
+  | 'Cancelled'
+
+/// AI 那部分的假状态。
+///
+/// **开关与配置完整性不在这里**：它们和真实后端一样从 `settings` 派生
+/// （`config::is_enabled` / `config::missing`），这样 `ai_enable` 写完库之后
+/// 下一次 `ai_status` 才会跟着变。摆成一个独立的布尔的话，
+/// 「开关写库了但状态没跟上」这类缺陷在测试里完全看不见。
+///
+/// 字段名的规矩和 `MockUpdate` 一致：这里的标量是**测试旋钮**，由假实现拼装成
+/// `AiStatus` 之后才交给前端，所以用 camelCase；而 `connection`、`conversations`、
+/// `messages`、`semanticHits` 里的东西是**原样吐给前端的后端结构体**，
+/// 一律 snake_case。
+export interface MockAi {
+  /// 还有多少篇笔记等着建索引。`ai_enable(true)` / `ai_reindex_all` 会把它改写成当前笔记数
+  pendingNotes: number
+  /// 向量化失败、等着重试的篇数。`ai_retry_failed` 返回它并清零
+  failedNotes: number
+  indexedChunks: number
+  memoryBytes: number
+  /// 装载索引时跳过的维度不符行数，非 0 说明换过 embedding 模型但没重建
+  dimMismatches: number
+  lastError: string | null
+  connection: MockConnectionReport
+  conversations: MockConversation[]
+  /// 会话 id（键是字符串，结构化克隆之后数字键本来就会变成字符串）→ 消息
+  messages: Record<string, MockChatMessage[]>
+  /// `ai_semantic_search` 的返回。AI 没开 / 没配全 / 查询为空时假实现照样返回 `[]`，
+  /// 和真实后端一样——搜索框每敲一个键都会调它，它不该报错。
+  semanticHits: MockSemanticHit[]
+}
+
 export interface MockInit {
   /// 当前窗口 label，决定 main.tsx 渲染主窗口还是快捕窗口
   windowLabel: 'main' | 'capture'
@@ -50,6 +143,7 @@ export interface MockInit {
   /// 覆盖 search_notes 的返回。设了之后 mock 不再自己算命中，
   /// 直接吐这份数据——用来精确构造 matched_terms / source 的组合。
   searchHits: MockSearchHit[] | null
+  ai: MockAi
 }
 
 /// 一条检索结果，字段名照抄 Rust 的 `SearchHit`。
@@ -72,7 +166,69 @@ export function initialState(overrides: Partial<MockInit> = {}): MockInit {
     failCommands: {},
     delays: {},
     searchHits: null,
+    ai: aiState(),
     ...overrides,
+  }
+}
+
+/// AI 的假状态。默认是「一片空白但连得通」：没有会话、没有索引、
+/// 测试连接两条链路都通——绝大多数用例只需要覆盖其中一两项。
+export function aiState(overrides: Partial<MockAi> = {}): MockAi {
+  return {
+    pendingNotes: 0,
+    failedNotes: 0,
+    indexedChunks: 0,
+    memoryBytes: 0,
+    dimMismatches: 0,
+    lastError: null,
+    connection: { embed_ok: true, embed_dim: 1536, chat_ok: true, error: null },
+    conversations: [],
+    messages: {},
+    semanticHits: [],
+    ...overrides,
+  }
+}
+
+/// 一份填全了的 AI 配置（OpenAI 兼容 + 密钥）。
+///
+/// **`ai.enabled` 不在里面**：「配好了」和「还没开」是两个不同的界面状态
+/// （引导页上一句是「先去设置里配置」，另一句是「AI 还没启用」），
+/// 而启用确认框那条路只在「配好了但没开」时才走得到。
+export function aiConfigured(overrides: Record<string, string> = {}): Record<string, string> {
+  return {
+    'ai.provider': 'openai',
+    'ai.base_url': 'https://api.example.com/v1',
+    'ai.api_key': 'sk-test',
+    'ai.chat_model': 'chat-x',
+    'ai.embed_model': 'embed-x',
+    ...overrides,
+  }
+}
+
+/// 配好了并且已经开着。
+export function aiEnabled(overrides: Record<string, string> = {}): Record<string, string> {
+  return aiConfigured({ 'ai.enabled': 'true', ...overrides })
+}
+
+/// 造一个会话。`updated_at` 跟着 id 走，好让「按 updated_at 降序」的列表顺序可预测。
+export function conversation(
+  id: number,
+  title: string,
+  patch: Partial<MockConversation> = {},
+): MockConversation {
+  return { id, title, created_at: 1_000 + id, updated_at: 1_000 + id, ...patch }
+}
+
+/// 造一条引用。`note_id` 默认等于 index 对应的那条笔记。
+export function citation(index: number, noteId: number, patch: Partial<MockCitation> = {}): MockCitation {
+  return {
+    index,
+    note_id: noteId,
+    uuid: `uuid-${noteId}`,
+    title: `笔记 ${noteId}`,
+    heading: '',
+    excerpt: `笔记 ${noteId} 里的一段`,
+    ...patch,
   }
 }
 
