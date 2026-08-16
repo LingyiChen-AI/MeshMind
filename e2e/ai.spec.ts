@@ -124,6 +124,33 @@ test('Retrieved 先到：引用条在任何回答文字出现之前就可见', a
   await expect(page.locator('.ai-message-assistant .ai-text')).toHaveCount(0)
 })
 
+test('新会话的第一个提问只显示一条，不和库里那条撞成两条', async ({ page }) => {
+  const mock = await openApp(page, { notes: NOTES, settings: aiEnabled() })
+  await openAi(page)
+  await ask(page, mock, '知识图谱是什么')
+
+  await mock.emitAsk({ Retrieved: { citations: [CITE_1] } })
+  await mock.emitAsk({ Delta: { text: '知识图谱是' } })
+  // 事件已经走完一圈，说明这一刻界面画的就是「回答进行中」的样子
+  await expect(page.locator('.ai-message-assistant .ai-text')).toHaveText('知识图谱是')
+  // 再给一拍：重拉如果发生，它是异步回来的，立刻断言会在它落地之前就通过。
+  await page.waitForTimeout(300)
+
+  // 第一个问题会建会话并 `setConversationId`，把消息加载 effect 触发一遍；而后端是
+  // **先落库再检索**的，那一拉必然拉到用户刚敲的这句话。它和乐观气泡是同一句话，
+  // 重拉不跳过的话，屏幕上就是一模一样的两条提问——用户看见自己的问题发了两遍。
+  await expect(page.locator('.ai-message-user')).toHaveCount(1)
+  await expect(page.locator('.ai-message-user .ai-text')).toHaveText('知识图谱是什么')
+
+  // 落定之后仍然只有一条：settle 重拉回来的那份顶掉乐观气泡，而不是叠在它上面。
+  await mock.emitAsk({ Done: { message_id: 7 } })
+  await expect
+    .poll(async () => (await mock.callsTo('ai_get_messages')).length, { timeout: 5_000 })
+    .toBeGreaterThan(0)
+  await expect(page.locator('.ai-thinking')).toHaveCount(0)
+  await expect(page.locator('.ai-message-user')).toHaveCount(1)
+})
+
 test('多个 Delta 拼成完整回答，Done 之后和库里那条对得上', async ({ page }) => {
   const mock = await openApp(page, { notes: NOTES, settings: aiEnabled() })
   await openAi(page)

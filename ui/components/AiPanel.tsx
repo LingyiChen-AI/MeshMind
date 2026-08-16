@@ -77,6 +77,13 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
   const conversationIdRef = useRef(conversationId)
   conversationIdRef.current = conversationId
 
+  // 当前相位也存一份 ref，给下面那个消息加载 effect 用。
+  // 不把 `ask.phase` 写进它的依赖数组，是因为那样每次相位变化都会多打一次
+  // `ai_get_messages`（终止态之后 settle 已经拉过一次了）；而 ref 在渲染期就赋值，
+  // effect 读到的一定是「此刻」的相位，不存在闭包过期的问题。
+  const askPhaseRef = useRef(ask.phase)
+  askPhaseRef.current = ask.phase
+
   const streamRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -146,6 +153,18 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
       setMessages([])
       return
     }
+    // **提问在飞的时候不能重拉**——这个 early return 看着多余，去掉就会有 bug：
+    //
+    // 新会话的第一个问题会在 submit 里 `setConversationId(刚建出来的 id)`，把这个
+    // effect 触发一遍。而后端 `ask::run` 是**先把提问落库、再做检索**的，所以这一拉
+    // 必然拉到用户刚敲的那句话；它和乐观显示的 `pending` 气泡是同一句话，屏幕上就成了
+    // 一模一样的两条提问，一直挂到 settle 才合并。（已有会话时 `conversationId` 不变，
+    // effect 不重跑，所以只有每个会话的第一个问题会撞上。）
+    //
+    // 跳过不会让数据库那一份丢掉：Done / Failed / Cancelled 三种终止态都会走 settle
+    // 重拉一次，顺带刷新会话标题。切换 / 新建 / 删除会话都会先把相位打回 idle，
+    // 那三条路径的加载照常发生。
+    if (askPhaseRef.current === 'streaming') return
     let alive = true
     ipc.aiGetMessages(conversationId).then(
       (rows) => {
