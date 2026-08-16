@@ -192,12 +192,20 @@ describe('AI 命令', () => {
 
     expect(raws).toHaveLength(1)
     const deliver = raws[0]
-    deliver({ index: 0, message: { Retrieved: { citations: [] } } })
+    // 引用的字段名保持 snake_case：这条路径没有 toCamel，谁也不会替它转。
+    const retrieved = {
+      Retrieved: {
+        citations: [
+          { index: 1, note_id: 42, uuid: 'u42', title: '部署流程', heading: '灰度', excerpt: '片段' },
+        ],
+      },
+    }
+    deliver({ index: 0, message: retrieved })
     deliver({ index: 1, message: { Delta: { text: '甲' } } })
     // 无字段变体是裸字符串，不能在半路被包成对象。
     deliver({ index: 2, message: 'Cancelled' })
 
-    expect(seen).toEqual([{ Retrieved: { citations: [] } }, { Delta: { text: '甲' } }, 'Cancelled'])
+    expect(seen).toEqual([retrieved, { Delta: { text: '甲' } }, 'Cancelled'])
   })
 
   it('aiCancel 不带参数', async () => {

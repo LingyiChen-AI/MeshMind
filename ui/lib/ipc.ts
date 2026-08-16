@@ -151,18 +151,36 @@ export interface SemanticHit {
 }
 
 /**
+ * Channel 投递过来的引用，字段名是 Rust 那边的 snake_case。
+ *
+ * 和 `Citation` 是同一个 Rust 结构体的两副面孔：走命令返回值时被 `toCamel`
+ * 洗成了 `noteId`，走 Channel 时**没人洗**，就是 `note_id`。
+ * 别把这里换成 `Citation`——TS 不会报错，运行时 `noteId` 是 undefined，
+ * 点引用会跳到一篇 id 为 undefined 的笔记上。
+ * 归一化由 `lib/ai.ts` 的 `reduceAsk` 负责，界面只见 `Citation` 一种形状。
+ */
+export interface RawCitation {
+  index: number
+  note_id: number
+  uuid: string
+  title: string
+  heading: string
+  excerpt: string
+}
+
+/**
  * 对应 Rust `AskEvent`。serde 的默认外部标签把有字段的变体序列化成单键对象
  * `{"Delta":{"text":"…"}}`，**无字段的 `Cancelled` 则是裸字符串** `"Cancelled"`。
  *
  * 两处容易栽跟头，都会表现为「界面安静地什么都不显示」而不是报错：
  *
  * 1. **这条路径不经过 `toCamel`**：Channel 的载荷由 Tauri 直接投递，
- *    所以字段名必须写成 Rust 那边的 snake_case（`message_id`）。
+ *    所以字段名必须写成 Rust 那边的 snake_case（`message_id`、`note_id`）。
  * 2. 判别时**必须先处理 `typeof event === 'string'` 这一支**，
  *    否则取消事件会被当成对象去取键，静默地什么也匹配不上。
  */
 export type AskEvent =
-  | { Retrieved: { citations: Citation[] } }
+  | { Retrieved: { citations: RawCitation[] } }
   | { Delta: { text: string } }
   | { Done: { message_id: number } }
   | { Failed: { message: string } }
