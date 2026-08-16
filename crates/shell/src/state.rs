@@ -33,9 +33,6 @@ pub struct AppState {
     pub conn: Mutex<Connection>,
     pub attachments_root: PathBuf,
     /// AI 的运行期状态。未启用 AI 时全是空的，不占内存也不起线程。
-    // 读它的人（后台 worker 与 ai_* 命令）还没落地，先压掉 dead_code；
-    // 接上之后删掉这行。
-    #[allow(dead_code)]
     pub ai: crate::ai::AiRuntime,
 }
 
