@@ -33,6 +33,7 @@ describe('shortcutLabels', () => {
       capture: '⌥Space',
       search: '⌘K',
       save: '⌘Enter',
+      ai: '⌘L',
     })
   })
 
@@ -42,6 +43,7 @@ describe('shortcutLabels', () => {
       capture: 'Ctrl+Alt+Space',
       search: 'Ctrl+K',
       save: 'Ctrl+Enter',
+      ai: 'Ctrl+L',
     })
   })
 })

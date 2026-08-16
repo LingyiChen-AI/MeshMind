@@ -38,13 +38,15 @@ export interface ShortcutLabels {
   search: string
   /** 快捕窗口保存并关闭。 */
   save: string
+  /** 主窗口开合右侧的问答栏。 */
+  ai: string
 }
 
 /** 按平台给出一组按键文案。抽成纯函数是为了两个分支都能单测。 */
 export function shortcutLabels(mac: boolean): ShortcutLabels {
   return mac
-    ? { capture: '⌥Space', search: '⌘K', save: '⌘Enter' }
-    : { capture: 'Ctrl+Alt+Space', search: 'Ctrl+K', save: 'Ctrl+Enter' }
+    ? { capture: '⌥Space', search: '⌘K', save: '⌘Enter', ai: '⌘L' }
+    : { capture: 'Ctrl+Alt+Space', search: 'Ctrl+K', save: 'Ctrl+Enter', ai: 'Ctrl+L' }
 }
 
 /** 当前平台的按键文案，界面上直接用这个。 */
