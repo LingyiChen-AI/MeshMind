@@ -2,14 +2,20 @@
 
 use std::collections::BTreeMap;
 
+use meshmind_core::ai::chat::{self, ChatMessage, Conversation};
+use meshmind_core::ai::index;
+use meshmind_core::ai::provider::{self, Message};
+use meshmind_core::ai::retrieve::Retrieved;
 use meshmind_core::attachments::{self, Attachment};
 use meshmind_core::notes::{self, NewNote, Note, NoteSummary};
 use meshmind_core::search::{self, SearchHit};
 use meshmind_core::{now_ms, CoreError};
 use serde::{Serialize, Serializer};
-use tauri::ipc::Response;
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Runtime, State};
 
+use crate::ai::ask::{self, AskEvent};
+use crate::ai::{config, http, worker};
 use crate::state::AppState;
 use crate::{quit, settings, shortcut, window};
 
@@ -291,11 +297,30 @@ pub fn confirm_quit<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
     Ok(())
 }
 
+/// 把设置项里的密钥换成一个「设没设过」的布尔。
+///
+/// 抽成自由函数是为了能直接单测——`get_settings` 本身要 `State`，
+/// 而这里真正想钉住的是「密钥不出去」这条规则本身。
+pub(crate) fn redact_settings(mut map: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let has_key = map
+        .remove(settings::KEY_AI_API_KEY)
+        .is_some_and(|v| !v.trim().is_empty());
+    map.insert(
+        settings::KEY_AI_API_KEY_SET.into(),
+        settings::write_bool(has_key).into(),
+    );
+    map
+}
+
 /// 读全部设置项。值一律是字符串，语义由前端解释。
+///
+/// **密钥不在返回值里**：`ai.api_key` 被剔除、换成合成的 `ai.api_key_set`。
+/// 密钥只有一条单向的写入路径（`set_setting`），永远不经 IPC 回到 webview，
+/// 也就不会出现在前端日志、错误上报或用户截图里。
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<BTreeMap<String, String>> {
     let conn = conn!(state);
-    Ok(meshmind_core::settings::get_all(&conn)?)
+    Ok(redact_settings(meshmind_core::settings::get_all(&conn)?))
 }
 
 /// 写一个设置项。
@@ -414,6 +439,386 @@ pub fn set_autostart<R: Runtime>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// AI
+// ---------------------------------------------------------------------------
+//
+// 下面这些结构体是 **IPC 的形状**，不属于 core：它们只为设置面板与问答界面
+// 而存在，core 里没有任何东西需要它们。
+
+/// 设置面板顶部那块状态。
+#[derive(Serialize)]
+pub struct AiStatus {
+    pub enabled: bool,
+    pub configured: bool,
+    /// 配置不完整时缺的那一项的中文名，完整时为 None。
+    pub missing_field: Option<&'static str>,
+    pub pending_notes: i64,
+    pub indexed_chunks: i64,
+    pub memory_bytes: usize,
+    /// 内存索引里维度和当前模型对不上、因而被跳过的向量数。
+    /// 非 0 说明换过 embedding 模型却没重建索引。
+    pub dim_mismatches: usize,
+    pub last_error: Option<String>,
+}
+
+/// `ai_enable` 的回执。开关之后前端要立刻知道「还有多少篇等着建索引」。
+#[derive(Serialize)]
+pub struct EnableReport {
+    pub pending_notes: i64,
+}
+
+/// 连通性自检的结果。两条链路分开报：embedding 通了而对话没通
+/// （模型名写错、账号没开对话权限）是很常见的一种半通状态。
+#[derive(Serialize)]
+pub struct ConnectionReport {
+    pub embed_ok: bool,
+    /// embedding 的维度。换模型前后对比它就知道索引要不要重建。
+    pub embed_dim: Option<usize>,
+    pub chat_ok: bool,
+    /// 已脱敏。
+    pub error: Option<String>,
+}
+
+/// 语义检索的结果按笔记归并后的形状。同一篇笔记可能命中多个块，
+/// 列表里只出现一次，摘要取分数最高的那一块。
+#[derive(Serialize)]
+pub struct SemanticHit {
+    pub note_id: i64,
+    pub uuid: String,
+    pub title: String,
+    pub excerpt: String,
+    pub score: f64,
+}
+
+/// 读配置：AI 没开或没配全就返回 None。
+///
+/// 给「静默降级」的调用方用（搜索框），它们要的是「拿不到就算了」而不是错误。
+fn usable_config(state: &State<'_, AppState>) -> Option<provider::AiConfig> {
+    let conn = conn!(state);
+    if !config::is_enabled(&conn) {
+        return None;
+    }
+    let cfg = config::load(&conn);
+    config::missing(&cfg).is_none().then_some(cfg)
+}
+
+#[tauri::command]
+pub fn ai_status(state: State<'_, AppState>) -> CmdResult<AiStatus> {
+    let (enabled, cfg, pending_notes, indexed_chunks, last_error) = {
+        let conn = conn!(state);
+        let cfg = config::load(&conn);
+        (
+            config::is_enabled(&conn),
+            cfg.clone(),
+            index::pending_count(&conn)?,
+            index::indexed_chunk_count(&conn, &cfg.embed_model)?,
+            index::last_error(&conn)?,
+        )
+    };
+
+    // 内存索引是另一把锁，等数据库锁放掉之后再取：两把锁没有必要同时持有，
+    // 叠在一起只会多出一处加锁顺序要操心的地方。
+    let (memory_bytes, dim_mismatches) = {
+        let slot = state.ai.index.lock().expect("向量索引锁已中毒");
+        slot.as_ref()
+            .map_or((0, 0), |i| (i.memory_bytes(), i.dim_mismatches()))
+    };
+
+    let missing_field = config::missing(&cfg);
+    Ok(AiStatus {
+        enabled,
+        configured: missing_field.is_none(),
+        missing_field,
+        pending_notes,
+        indexed_chunks,
+        memory_bytes,
+        dim_mismatches,
+        last_error,
+    })
+}
+
+/// 开 / 关 AI。
+///
+/// 置真时的顺序是死的：**先把 `ai.enabled` 写进库，再 spawn worker**。
+/// 反过来的话 worker 第一轮醒来读到的还是 `false`，什么都不做就回去睡，
+/// 用户要白等一个 tick（30 秒）才看到进度动起来。
+#[tauri::command]
+pub fn ai_enable<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<EnableReport> {
+    let pending_notes = {
+        let conn = conn!(state);
+        meshmind_core::settings::set(
+            &conn,
+            settings::KEY_AI_ENABLED,
+            settings::write_bool(enabled),
+        )?;
+        if enabled {
+            // 开启时全量入队：之前写的笔记一篇都没被向量化过。
+            index::enqueue_all(&conn, now_ms())?;
+        }
+        index::pending_count(&conn)?
+    };
+
+    if enabled {
+        {
+            let mut slot = state.ai.wake.lock().expect("AI 唤醒通道锁已中毒");
+            // 重复调用不该起第二个线程。
+            if slot.is_none() {
+                *slot = Some(worker::spawn(app.clone()));
+            }
+        }
+        // 唤醒要在放掉上面那把锁之后：`wake_worker` 自己也要锁同一个槽位，
+        // 攥着它调等于自己锁自己。
+        state.ai.wake_worker();
+    } else {
+        // 关掉 AI 意味着「此后没有任何网络行为」，在飞的提问也算。
+        state.ai.cancel_ask();
+        // 发送端一丢，worker 的 recv_timeout 拿到 Disconnected，线程自行退出。
+        *state.ai.wake.lock().expect("AI 唤醒通道锁已中毒") = None;
+        // 内存索引可能是几十上百 MB，关掉就该还给系统。
+        *state.ai.index.lock().expect("向量索引锁已中毒") = None;
+    }
+
+    Ok(EnableReport { pending_notes })
+}
+
+/// 拿当前配置真的发两个请求，验证 Base URL / 密钥 / 模型名都对。
+///
+/// 没有这个按钮，用户 Base URL 填错一个字符就只能靠猜——真正的报错
+/// 要等到后台 worker 跑完一轮才会出现在队列的 last_error 里。
+// `(async)`：这个函数是同步的，但它要发两个真实的 HTTP 请求（最坏 60 秒）。
+// Tauri 的同步命令跑在主线程上，不加这个属性，用户一点「测试连接」整个界面
+// 就冻住——加上之后 Tauri 把它丢进阻塞线程池，主线程照常响应。
+#[tauri::command(async)]
+pub fn ai_test_connection(state: State<'_, AppState>) -> CmdResult<ConnectionReport> {
+    // ---- 锁：只为读一次配置 ----
+    let cfg = {
+        let conn = conn!(state);
+        config::load(&conn)
+    };
+    // ---- 解锁：两个请求都在无锁状态下发 ----
+
+    if let Some(field) = config::missing(&cfg) {
+        return Ok(ConnectionReport {
+            embed_ok: false,
+            embed_dim: None,
+            chat_ok: false,
+            error: Some(format!("AI 未配置完整，缺少: {field}")),
+        });
+    }
+
+    let mut error: Option<String> = None;
+    let mut record = |message: String| {
+        // 只留第一条：先失败的那个通常才是根因（Base URL 错了会让两条都失败，
+        // 把第二条也拼上去只是同一句话说两遍）。密钥可能出现在任何一层错误里，
+        // 统一在这里再过一次脱敏。
+        if error.is_none() {
+            error = Some(http::redact(&message, &cfg.api_key));
+        }
+    };
+
+    let embed_dim = match test_embed(&cfg) {
+        Ok(dim) => Some(dim),
+        Err(message) => {
+            record(message);
+            None
+        }
+    };
+    let chat_ok = match test_chat(&cfg) {
+        Ok(()) => true,
+        Err(message) => {
+            record(message);
+            false
+        }
+    };
+
+    Ok(ConnectionReport {
+        embed_ok: embed_dim.is_some(),
+        embed_dim,
+        chat_ok,
+        error,
+    })
+}
+
+fn test_embed(cfg: &provider::AiConfig) -> Result<usize, String> {
+    let request = provider::embed_request(cfg, &["ping".to_string()]).map_err(|e| e.to_string())?;
+    let body = http::post(&request, &cfg.api_key)?;
+    let vectors = provider::parse_embed_response(cfg.provider, &body).map_err(|e| e.to_string())?;
+    match vectors.first() {
+        // 维度为 0 的向量等于没有向量：让它冒充成功，用户会以为配好了，
+        // 然后对着一个永远搜不到东西的知识库发愁。
+        Some(v) if !v.is_empty() => Ok(v.len()),
+        _ => Err("Embedding 服务没有返回任何向量".into()),
+    }
+}
+
+fn test_chat(cfg: &provider::AiConfig) -> Result<(), String> {
+    // 单轮问候，非流式：这里要验的是「能不能通」，不是回答质量。
+    let messages = [Message::user("你好")];
+    let request = provider::chat_request(cfg, &messages, false).map_err(|e| e.to_string())?;
+    let body = http::post(&request, &cfg.api_key)?;
+    provider::parse_chat_response(cfg.provider, &body).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 清空全部向量并重新入队。换 embedding 模型之后必须做一次——
+/// 不同模型的向量空间不通用，混在一起检索出来的东西毫无意义。
+#[tauri::command]
+pub fn ai_reindex_all(state: State<'_, AppState>) -> CmdResult<usize> {
+    let queued = {
+        let conn = conn!(state);
+        index::clear_embeddings(&conn)?;
+        index::enqueue_all(&conn, now_ms())?
+    };
+    // 内存里那份是旧模型的，留着只会让下一次检索拿旧向量去比。
+    *state.ai.index.lock().expect("向量索引锁已中毒") = None;
+    state.ai.wake_worker();
+    Ok(queued)
+}
+
+/// 把退避到底、已经不再重试的队列项重新激活。
+#[tauri::command]
+pub fn ai_retry_failed(state: State<'_, AppState>) -> CmdResult<usize> {
+    let reset = {
+        let conn = conn!(state);
+        index::retry_failed(&conn)?
+    };
+    state.ai.wake_worker();
+    Ok(reset)
+}
+
+/// 发起一次提问。**立刻返回**，答案通过 `on_event` 通道流回前端。
+///
+/// 事件的形状见 [`AskEvent`]。同一时刻只允许一个提问在飞，
+/// 新的提问会自动取消上一个。
+#[tauri::command]
+pub fn ai_ask<R: Runtime>(
+    app: AppHandle<R>,
+    conversation_id: i64,
+    question: String,
+    on_event: Channel<AskEvent>,
+) -> CmdResult<()> {
+    ask::start(app, conversation_id, question, on_event);
+    Ok(())
+}
+
+/// 取消在飞的提问。没有在飞的提问时什么也不做，不是错误。
+#[tauri::command]
+pub fn ai_cancel(state: State<'_, AppState>) -> CmdResult<()> {
+    state.ai.cancel_ask();
+    Ok(())
+}
+
+/// 语义检索，结果按笔记归并。
+///
+/// **AI 未启用、未配置完整或查询为空时返回空数组，而不是错误**：搜索框
+/// 每敲一个键都会调它，为一个「本来就没开」的功能弹错误横幅不可接受。
+// `(async)`：查询要先过一次 embedding 请求。同步命令跑在主线程上，
+// 而这个命令是搜索框每敲一个键都会调的——留在主线程上等于每敲一下就卡一次。
+#[tauri::command(async)]
+pub fn ai_semantic_search<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    query: String,
+    limit: u32,
+) -> CmdResult<Vec<SemanticHit>> {
+    if query.trim().is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(mut cfg) = usable_config(&state) else {
+        return Ok(Vec::new());
+    };
+    // `top_k` 是**块**的预算，而且它的默认值是按「喂给模型多少片段」定的（6）。
+    // 搜索框要的是**笔记**条数，同一篇常常命中好几块——照搬 top_k 会让一次
+    // limit = 20 的搜索只剩两三条结果。放宽到 3 倍，再由归并后截断。
+    cfg.top_k = (limit as usize).saturating_mul(3).clamp(1, 60);
+
+    let hits = ask::retrieve_for(&app, &cfg, &query)?;
+    Ok(merge_by_note(hits, limit as usize))
+}
+
+/// 按 `note_id` 归并检索结果：同一篇只留一条，摘要取分数最高的那一块。
+///
+/// 抽成自由函数是为了能直接单测——这段逻辑走错的表现是搜索结果里同一篇
+/// 笔记连着出现五遍、把其他笔记挤出屏幕，而它需要一次真实检索才复现得出来。
+/// 不假设入参已经排好序：真相是分数，不是调用方的顺序。
+fn merge_by_note(hits: Vec<Retrieved>, limit: usize) -> Vec<SemanticHit> {
+    let mut merged: Vec<SemanticHit> = Vec::new();
+    for hit in hits {
+        match merged.iter_mut().find(|m| m.note_id == hit.note_id) {
+            Some(existing) => {
+                if hit.score > existing.score {
+                    existing.score = hit.score;
+                    existing.excerpt = excerpt(&hit.text);
+                }
+            }
+            None => merged.push(SemanticHit {
+                note_id: hit.note_id,
+                uuid: hit.uuid,
+                title: hit.title,
+                excerpt: excerpt(&hit.text),
+                score: hit.score,
+            }),
+        }
+    }
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.note_id.cmp(&b.note_id))
+    });
+    merged.truncate(limit);
+    merged
+}
+
+/// 摘要按**字符**截断。按字节切会劈开汉字，回显出来是乱码。
+fn excerpt(text: &str) -> String {
+    text.chars()
+        .take(meshmind_core::ai::prompt::EXCERPT_MAX_CHARS)
+        .collect()
+}
+
+#[tauri::command]
+pub fn ai_list_conversations(
+    state: State<'_, AppState>,
+    limit: u32,
+    offset: u32,
+) -> CmdResult<Vec<Conversation>> {
+    let conn = conn!(state);
+    Ok(chat::list_conversations(&conn, limit, offset)?)
+}
+
+#[tauri::command]
+pub fn ai_create_conversation(state: State<'_, AppState>) -> CmdResult<i64> {
+    let conn = conn!(state);
+    Ok(chat::create_conversation(&conn, now_ms())?)
+}
+
+#[tauri::command]
+pub fn ai_get_messages(
+    state: State<'_, AppState>,
+    conversation_id: i64,
+) -> CmdResult<Vec<ChatMessage>> {
+    let conn = conn!(state);
+    Ok(chat::get_messages(&conn, conversation_id)?)
+}
+
+#[tauri::command]
+pub fn ai_delete_conversation(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let conn = conn!(state);
+    Ok(chat::delete_conversation(&conn, id)?)
+}
+
+#[tauri::command]
+pub fn ai_rename_conversation(state: State<'_, AppState>, id: i64, title: String) -> CmdResult<()> {
+    let conn = conn!(state);
+    Ok(chat::rename_conversation(&conn, id, &title)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +868,142 @@ mod tests {
                 .expect_err(&format!("{ext:?} 会被拼进写盘路径，应当被拒绝"))
                 .to_string();
             assert!(err.contains("ext"), "错误里应点名参数，实际: {err}");
+        }
+    }
+
+    /// 密钥绝不能经 IPC 回到前端。它只该有一条单向的写入路径。
+    #[test]
+    fn get_settings_never_returns_the_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path()).unwrap();
+        {
+            let conn = state.conn.lock().unwrap();
+            meshmind_core::settings::set(&conn, crate::settings::KEY_AI_API_KEY, "sk-secret")
+                .unwrap();
+            // 顺带放一个普通设置项进去：脱敏不能把别的键也一起抹掉。
+            meshmind_core::settings::set(&conn, crate::settings::KEY_AI_BASE_URL, "https://x/v1")
+                .unwrap();
+        }
+
+        let map = {
+            let conn = state.conn.lock().unwrap();
+            redact_settings(meshmind_core::settings::get_all(&conn).unwrap())
+        };
+
+        assert!(!map.contains_key(crate::settings::KEY_AI_API_KEY));
+        assert!(
+            !map.values().any(|v| v.contains("sk-secret")),
+            "密钥出现在了别的键的值里"
+        );
+        assert_eq!(
+            map.get(crate::settings::KEY_AI_API_KEY_SET)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            map.get(crate::settings::KEY_AI_BASE_URL)
+                .map(String::as_str),
+            Some("https://x/v1"),
+            "别的设置项要原样透出"
+        );
+    }
+
+    /// 没设过密钥时合成键是 "false"，不能缺席——前端要靠它决定
+    /// 密钥输入框显示「未设置」还是「已设置（留空则不修改）」。
+    #[test]
+    fn the_synthesised_key_is_false_when_unset() {
+        let map = redact_settings(BTreeMap::new());
+        assert_eq!(
+            map.get(crate::settings::KEY_AI_API_KEY_SET)
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    /// 设成空串等同于未设置。
+    #[test]
+    fn an_empty_api_key_counts_as_unset() {
+        let mut input = BTreeMap::new();
+        input.insert(crate::settings::KEY_AI_API_KEY.to_string(), String::new());
+        let map = redact_settings(input);
+        assert_eq!(
+            map.get(crate::settings::KEY_AI_API_KEY_SET)
+                .map(String::as_str),
+            Some("false")
+        );
+        assert!(!map.contains_key(crate::settings::KEY_AI_API_KEY));
+    }
+
+    mod semantic {
+        use super::*;
+        use meshmind_core::ai::retrieve::Retrieved;
+
+        fn hit(chunk_id: i64, note_id: i64, text: &str, score: f64) -> Retrieved {
+            Retrieved {
+                chunk_id,
+                note_id,
+                uuid: format!("u{note_id}"),
+                title: format!("笔记{note_id}"),
+                heading: String::new(),
+                text: text.into(),
+                score,
+                from_fts: true,
+                from_vec: false,
+            }
+        }
+
+        /// 同一篇笔记命中多个块时列表里只出现一次，摘要取分数最高的那一块。
+        /// 少了归并，一篇被切成五块的长笔记会把搜索结果整页占满。
+        #[test]
+        fn merges_chunks_of_the_same_note_and_keeps_the_best_excerpt() {
+            // 故意把高分那块放在后面：归并的依据必须是分数，不是入参顺序。
+            let merged = merge_by_note(
+                vec![
+                    hit(1, 7, "次要的一段", 0.2),
+                    hit(2, 9, "另一篇", 0.5),
+                    hit(3, 7, "最相关的一段", 0.9),
+                ],
+                10,
+            );
+
+            assert_eq!(merged.len(), 2, "两篇笔记只该有两条结果");
+            assert_eq!(merged[0].note_id, 7);
+            assert_eq!(merged[0].excerpt, "最相关的一段");
+            assert!((merged[0].score - 0.9).abs() < f64::EPSILON);
+            assert_eq!(merged[0].uuid, "u7");
+            assert_eq!(merged[1].note_id, 9);
+        }
+
+        /// 截断发生在归并之后。反过来（先截断再归并）会让 limit = 3 的搜索
+        /// 在一篇长笔记霸占前三块时只返回一条结果。
+        #[test]
+        fn the_limit_counts_notes_not_chunks() {
+            let hits = vec![
+                hit(1, 7, "甲", 0.9),
+                hit(2, 7, "乙", 0.8),
+                hit(3, 7, "丙", 0.7),
+                hit(4, 8, "丁", 0.6),
+                hit(5, 9, "戊", 0.5),
+                hit(6, 10, "己", 0.4),
+            ];
+            let merged = merge_by_note(hits, 3);
+            assert_eq!(
+                merged.iter().map(|m| m.note_id).collect::<Vec<_>>(),
+                vec![7, 8, 9]
+            );
+        }
+
+        /// 摘要按字符截断。按字节切会劈开汉字，界面上就是一串乱码。
+        #[test]
+        fn the_excerpt_is_truncated_by_characters() {
+            let long = "汉".repeat(meshmind_core::ai::prompt::EXCERPT_MAX_CHARS + 50);
+            let merged = merge_by_note(vec![hit(1, 7, &long, 0.5)], 10);
+            let excerpt = &merged[0].excerpt;
+            assert_eq!(
+                excerpt.chars().count(),
+                meshmind_core::ai::prompt::EXCERPT_MAX_CHARS
+            );
+            assert!(excerpt.chars().all(|c| c == '汉'), "截断劈开了汉字");
         }
     }
 
@@ -677,10 +1218,14 @@ mod tests {
                 .build()
                 .unwrap();
 
+            // 全新的库里没有任何真实设置项，但合成的 `ai.api_key_set` 必须在场：
+            // 前端靠它决定密钥输入框显示「未设置」还是「已设置（留空则不修改）」。
+            let fresh = invoke(&webview, "get_settings", serde_json::json!({})).unwrap();
+            assert_eq!(fresh[crate::settings::KEY_AI_API_KEY_SET], "false");
             assert_eq!(
-                invoke(&webview, "get_settings", serde_json::json!({})).unwrap(),
-                serde_json::json!({}),
-                "全新的库里不该有任何设置项"
+                fresh.as_object().unwrap().len(),
+                1,
+                "全新的库里不该有任何真实设置项，实际: {fresh}"
             );
 
             invoke(
@@ -714,6 +1259,44 @@ mod tests {
                 all.get("hotkey.captrue").is_none(),
                 "被拒的 key 不该出现在设置表里: {all}"
             );
+        }
+
+        /// 「密钥不经 IPC 回到前端」这件事必须在**真实的往返**上验一次。
+        ///
+        /// 单测里那条 `get_settings_never_returns_the_api_key` 直接调
+        /// `redact_settings`，测的是脱敏规则本身：把 `get_settings` 改回
+        /// 直接返回原始 map，它照样绿——函数还在，只是没人调它了。而这
+        /// 正是最可能发生的退化（重构时顺手把那层包装拆掉）。这条走一次
+        /// 真 invoke，堵的就是「写好了却没接上」。
+        #[test]
+        fn get_settings_over_ipc_never_leaks_the_api_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let state = AppState::initialize(dir.path()).unwrap();
+            {
+                let conn = state.conn.lock().unwrap();
+                meshmind_core::settings::set(
+                    &conn,
+                    crate::settings::KEY_AI_API_KEY,
+                    "sk-must-not-leak",
+                )
+                .unwrap();
+            }
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![super::super::get_settings])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            app.manage(state);
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .unwrap();
+
+            let all = invoke(&webview, "get_settings", serde_json::json!({})).unwrap();
+            assert!(
+                !all.to_string().contains("sk-must-not-leak"),
+                "密钥经 IPC 漏给了前端: {all}"
+            );
+            assert!(all.get(crate::settings::KEY_AI_API_KEY).is_none());
+            assert_eq!(all[crate::settings::KEY_AI_API_KEY_SET], "true");
         }
 
         #[test]
