@@ -8,7 +8,7 @@
 //
 // 组件只管渲染，不许在 JSX 里重新实现这里的任何一条规则。
 
-import type { AskEvent, Citation, RawCitation } from './ipc'
+import type { AskEvent, Citation, RawCitation, SemanticHit } from './ipc'
 
 /**
  * 一次提问的进度。
@@ -122,6 +122,44 @@ export function splitCitedText(text: string): CitedPart[] {
 
   if (cursor < text.length) parts.push({ kind: 'text', text: text.slice(cursor) })
   return parts
+}
+
+/**
+ * 语义结果里去掉已经在关键词组里出现过的笔记。
+ *
+ * 两组是同一次搜索的两种召回方式，重合是常态（一篇既字面命中又语义相关的笔记
+ * 恰恰是最该排在前面的那种）。同一个标题在一屏里出现两次，用户第一反应是
+ * 「点哪个？」而不是「这篇很相关」。
+ */
+export function dropSeenNotes(hits: SemanticHit[], seenNoteIds: number[]): SemanticHit[] {
+  const seen = new Set(seenNoteIds)
+  return hits.filter((hit) => !seen.has(hit.noteId))
+}
+
+/**
+ * 「只认最后一次」的请求闸门：每次调用都真的发请求，但**只有最后发出的那一次
+ * 的结果会被 commit**，先发后到的一律丢掉。
+ *
+ * 为什么非要有它：语义检索每敲一个键都要先过一次 embedding 请求，比字面检索
+ * 慢一个数量级，而慢请求的返回顺序不由我们说了算。少了这道闸门，「知识图」的
+ * 结果会在「知识图谱」的结果之后落地，把已经对的那一屏改成旧的——不报错，
+ * 只是显示的东西和输入框里的字对不上，而且很难复现。
+ *
+ * 闸门只管「新旧」，不管组件死活：卸载后不该再 setState 是调用方在 `commit`
+ * 里自己判断的事（两件事的判据不同，混在一起会让其中一个失效而没人发现）。
+ */
+export type LatestOnly<T> = (input: string, commit: (value: T) => void) => Promise<void>
+
+export function createLatestOnly<T>(run: (input: string) => Promise<T>): LatestOnly<T> {
+  let latest = 0
+  return async (input, commit) => {
+    latest += 1
+    const seq = latest
+    const value = await run(input)
+    // 期间又发过新的，这一份已经过期：丢掉，什么都不做。
+    if (seq !== latest) return
+    commit(value)
+  }
 }
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const

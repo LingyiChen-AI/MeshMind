@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBytes, initialAsk, reduceAsk, splitCitedText } from './ai'
-import type { AskEvent, RawCitation } from './ipc'
+import {
+  createLatestOnly,
+  dropSeenNotes,
+  formatBytes,
+  initialAsk,
+  reduceAsk,
+  splitCitedText,
+} from './ai'
+import type { AskEvent, RawCitation, SemanticHit } from './ipc'
 
 /** Channel 投递过来的引用是 snake_case 的，fixture 必须照这个来。 */
 const rawCitation = (index: number, noteId: number): RawCitation => ({
@@ -146,5 +153,91 @@ describe('formatBytes', () => {
   it('保留一位小数而不是取整', () => {
     expect(formatBytes(1536)).toBe('1.5 KB')
     expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe('3.0 GB')
+  })
+})
+
+/** 语义结果的最小 fixture，只有 noteId 参与去重。 */
+const semanticHit = (noteId: number): SemanticHit => ({
+  noteId,
+  uuid: `u${noteId}`,
+  title: `笔记${noteId}`,
+  excerpt: '片段',
+  score: 0.8,
+})
+
+describe('dropSeenNotes', () => {
+  it('去掉已经在关键词组里出现过的笔记', () => {
+    const kept = dropSeenNotes([semanticHit(1), semanticHit(2), semanticHit(3)], [2])
+    expect(kept.map((hit) => hit.noteId)).toEqual([1, 3])
+  })
+
+  it('没有重合时原样保留，且保持原有顺序（分数序由后端定）', () => {
+    const hits = [semanticHit(5), semanticHit(4)]
+    expect(dropSeenNotes(hits, [9]).map((hit) => hit.noteId)).toEqual([5, 4])
+  })
+
+  it('全部重合时返回空数组——这一组该整个消失', () => {
+    expect(dropSeenNotes([semanticHit(1)], [1])).toEqual([])
+  })
+})
+
+describe('createLatestOnly', () => {
+  /** 手动控制每个请求什么时候返回，好把「先发后到」摆出来。 */
+  function deferred() {
+    const resolvers = new Map<string, (value: string[]) => void>()
+    const run = (input: string) =>
+      new Promise<string[]>((resolve) => {
+        resolvers.set(input, resolve)
+      })
+    return { run, resolve: (input: string, value: string[]) => resolvers.get(input)?.(value) }
+  }
+
+  /**
+   * 这条是整个闸门存在的理由：先发的请求晚回来，不许覆盖已经落地的新结果。
+   *
+   * 去掉 `createLatestOnly` 里的序号判断，`committed` 会变成
+   * `[['谱'], ['图']]`——最后停在旧查询的结果上，正是要防的那种。
+   */
+  it('先发后到的旧结果被丢弃', async () => {
+    const { run, resolve } = deferred()
+    const latestOnly = createLatestOnly(run)
+    const committed: string[][] = []
+    const commit = (value: string[]) => committed.push(value)
+
+    const older = latestOnly('知识图', commit)
+    const newer = latestOnly('知识图谱', commit)
+
+    // 新的先回来落地，旧的随后才姗姗来迟。
+    resolve('知识图谱', ['谱'])
+    await newer
+    resolve('知识图', ['图'])
+    await older
+
+    expect(committed).toEqual([['谱']])
+  })
+
+  // 反面：闸门不能变成「谁的结果都不要」。少了这条，把实现写成永不 commit 也是绿的。
+  it('最后一次发出的请求照常 commit', async () => {
+    const { run, resolve } = deferred()
+    const latestOnly = createLatestOnly(run)
+    const committed: string[][] = []
+
+    const only = latestOnly('查询', (value) => committed.push(value))
+    resolve('查询', ['结果'])
+    await only
+
+    expect(committed).toEqual([['结果']])
+  })
+
+  // 丢的只是**结果**，请求本身照发——否则防抖之外又多一层看不见的吞请求。
+  it('每次调用都真的发出一次请求', async () => {
+    const seen: string[] = []
+    const latestOnly = createLatestOnly(async (input: string) => {
+      seen.push(input)
+      return input
+    })
+    await latestOnly('一', () => {})
+    await latestOnly('二', () => {})
+    expect(seen).toEqual(['一', '二'])
   })
 })

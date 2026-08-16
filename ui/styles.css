@@ -414,6 +414,26 @@ button:disabled {
   overflow-y: auto;
 }
 
+/* 两组结果（关键词匹配 / 语义相关）共用一条滚动条：各滚各的会让「往下翻」
+   在两个列表之间反复横跳。所以滚动挪到外层，里面的列表不再自己滚。
+   选择器带上 .search-groups 是为了不碰回收站——它也用 .search-results。 */
+.search-groups {
+  overflow-y: auto;
+}
+
+.search-groups .search-results {
+  overflow: visible;
+}
+
+.search-group-title {
+  margin: 0;
+  padding: 8px 14px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: none;
+}
+
 .search-hit {
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
