@@ -26,6 +26,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { AiPanel } from './components/AiPanel'
 import { NoteList } from './components/NoteList'
 import { SearchPanel } from './components/SearchPanel'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -91,6 +92,12 @@ export function App() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [rebuilding, setRebuilding] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  // 右侧问答栏。**不是遮罩**（可以边看笔记边问），所以不进 overlay 那个状态。
+  // 开合状态刻意不持久化：一个开合状态不值得占一个设置键。
+  const [aiOpen, setAiOpen] = useState(false)
+  // 每次关掉设置面板就 +1，让问答栏重新拉一次 AI 状态——用户很可能刚在那里
+  // 把 AI 配好、启用了，回来还看到「先去设置里配置」就太蠢了。
+  const [aiStatusToken, setAiStatusToken] = useState(0)
 
   // 分页状态同时存进 ref：刷新和「加载更多」都在 await 之后才用到它，
   // 那时闭包里的 page 已经可能是上一轮的了。setPage 是唯一的写入口，两者不会分家。
@@ -437,13 +444,18 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  // ⌘/Ctrl+K 开关搜索面板。Esc 由各面板自己处理。
+  // ⌘/Ctrl+K 开关搜索面板，⌘/Ctrl+L 开合问答栏。Esc 由各面板自己处理。
   // toggleOverlay 天然保证「同时只有一层」：开着回收站时按 ⌘K 直接换成搜索。
+  // 问答栏不在这套互斥里——它是右侧的一栏而不是遮罩，和别的面板可以并存。
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         setOverlay((prev) => toggleOverlay(prev, 'search'))
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') {
+        event.preventDefault()
+        setAiOpen((prev) => !prev)
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -550,6 +562,20 @@ export function App() {
     setNotice(`已恢复《${note.title.trim() || '无标题'}》`)
   }, [])
 
+  /** 关掉设置面板。顺手让问答栏重新拉一次 AI 状态（用户可能刚在里面配好）。 */
+  const closeSettings = useCallback(() => {
+    setOverlay((prev) => closeOverlay(prev, 'settings'))
+    setAiStatusToken((prev) => prev + 1)
+  }, [])
+
+  /** 点回答里的引用：照常打开那篇笔记，**问答栏保持打开**——用户要的是对照着看。 */
+  const handleOpenCited = useCallback(
+    (noteId: number) => {
+      void openNote(noteId)
+    },
+    [openNote],
+  )
+
   return (
     <div className="app">
       {/* 绝大多数启动里这里什么都不渲染——没有新版、或者根本没查通，都归 idle。 */}
@@ -562,6 +588,14 @@ export function App() {
           </button>
           <button type="button" onClick={() => setOverlay('search')}>
             搜索 {keys.search}
+          </button>
+          <button
+            type="button"
+            className={aiOpen ? 'primary' : ''}
+            title="用你的笔记回答问题，答案带可点的引用"
+            onClick={() => setAiOpen((prev) => !prev)}
+          >
+            问答 {keys.ai}
           </button>
         </div>
         <TagFilter tags={tags} selected={activeTag} onSelect={setSelectedTag} />
@@ -629,6 +663,17 @@ export function App() {
         )}
       </main>
 
+      {/* 问答栏是右侧的一栏，不是遮罩：可以边看笔记边问，点引用跳过去也不必先关掉它。
+          关掉即卸载，AiPanel 会在卸载时取消在飞的提问。 */}
+      {aiOpen ? (
+        <AiPanel
+          onClose={() => setAiOpen(false)}
+          onOpenNote={handleOpenCited}
+          onOpenSettings={() => setOverlay('settings')}
+          statusToken={aiStatusToken}
+        />
+      ) : null}
+
       {/* 三层遮罩由 overlay 一个状态决定，天然互斥；各面板的 onClose 只关掉自己那层
           （closeOverlay），因为它可能是异步回调，那时前台可能已经换层了。 */}
       {overlay === 'search' ? (
@@ -647,7 +692,7 @@ export function App() {
       ) : null}
 
       {overlay === 'settings' ? (
-        <SettingsPanel onClose={() => setOverlay((prev) => closeOverlay(prev, 'settings'))} />
+        <SettingsPanel onClose={closeSettings} />
       ) : null}
 
       {error ? (
