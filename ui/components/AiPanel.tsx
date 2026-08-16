@@ -315,6 +315,9 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
       setConversationId(list[0]?.id ?? null)
       setAsk(initialAsk())
       setPending(null)
+      // 和切换 / 新建会话一样要清掉提示：上一次取消留下的「已停止生成」
+      // 说的是被删掉的那个会话，跟着活到下一个会话上只会让人莫名其妙。
+      setNotice(null)
     } catch (err) {
       if (aliveRef.current) setError(String(err))
     }
