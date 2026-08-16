@@ -28,6 +28,22 @@ pub enum CoreError {
 
     #[error("笔记内容无效: {0}")]
     InvalidContent(String),
+
+    /// AI 配置不完整。带上缺了哪一项——「AI 未配置」这四个字对用户毫无帮助，
+    /// 他需要知道到底是 Base URL 没填还是模型名没填。
+    #[error("AI 未配置完整，缺少: {0}")]
+    AiNotConfigured(String),
+
+    /// 服务返回的结构对不上预期。这不是用户的错，多半是 Base URL 指错了地方
+    /// （比如把 Ollama 的地址填进了 OpenAI 模式），所以消息要能提示这一点。
+    #[error("AI 服务返回的内容无法解析（请检查 Base URL 与服务商类型是否匹配）: {0}")]
+    AiProtocol(String),
+
+    #[error("向量维度不一致: 期望 {expected}，实际 {got}")]
+    EmbeddingDimMismatch { expected: usize, got: usize },
+
+    #[error("会话不存在: {0}")]
+    ConversationNotFound(i64),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -54,5 +70,33 @@ mod tests {
     fn invalid_content_message_contains_reason() {
         let e = CoreError::InvalidContent("expected value at line 1".into());
         assert_eq!(e.to_string(), "笔记内容无效: expected value at line 1");
+    }
+
+    #[test]
+    fn ai_not_configured_names_the_missing_field() {
+        // 光说「未配置」用户不知道该填哪一格。
+        let e = CoreError::AiNotConfigured("Base URL".into());
+        assert!(e.to_string().contains("Base URL"));
+    }
+
+    #[test]
+    fn ai_protocol_error_hints_at_base_url() {
+        let e = CoreError::AiProtocol("missing field `data`".into());
+        let message = e.to_string();
+        assert!(
+            message.contains("Base URL"),
+            "解析失败最常见的原因是地址填错，消息要指出来"
+        );
+        assert!(message.contains("missing field `data`"));
+    }
+
+    #[test]
+    fn dim_mismatch_reports_both_numbers() {
+        let e = CoreError::EmbeddingDimMismatch {
+            expected: 1536,
+            got: 768,
+        };
+        let message = e.to_string();
+        assert!(message.contains("1536") && message.contains("768"));
     }
 }
