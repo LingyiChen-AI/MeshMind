@@ -9,6 +9,7 @@ use crate::error::{CoreError, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("db/migrations/001_init.sql"),
     include_str!("db/migrations/002_settings.sql"),
+    include_str!("db/migrations/003_ai.sql"),
 ];
 
 /// 打开磁盘数据库，父目录不存在则创建。
@@ -210,6 +211,12 @@ mod tests {
             "notes_fts",
             "notes_py",
             "settings",
+            "chunks",
+            "chunk_embeddings",
+            "embed_queue",
+            "chunks_fts",
+            "conversations",
+            "messages",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -220,5 +227,121 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "缺少表 {table}");
         }
+    }
+
+    /// 停在 002 的老库升级后只跑 003，已有笔记与设置毫发无损。
+    #[test]
+    fn migrate_upgrades_a_database_that_stopped_at_002() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute(
+            "INSERT INTO notes (uuid, title, body_json, body_text, created_at, updated_at)
+             VALUES ('u', 't', '{}', 't', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('theme', 'dark')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let notes: i64 = conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notes, 1, "增量迁移不该动已有数据");
+        let theme: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'theme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(theme, "dark");
+        let chunks: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'chunks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(chunks, 1, "003 没有被应用");
+    }
+
+    /// 003 只能是追加，不能改动 001/002。
+    #[test]
+    fn migration_003_is_append_only() {
+        assert_eq!(MIGRATIONS.len(), 3);
+        assert!(MIGRATIONS[0].contains("CREATE TABLE notes"));
+        assert!(MIGRATIONS[1].contains("CREATE TABLE settings"));
+        assert!(!MIGRATIONS[0].contains("chunks"));
+        assert!(!MIGRATIONS[1].contains("chunks"));
+        assert!(MIGRATIONS[2].contains("CREATE TABLE chunks"));
+    }
+
+    /// 硬删除笔记时，块、向量、队列行必须靠外键级联一起消失。
+    /// 少了任何一条级联，purge 之后会留下指向不存在笔记的孤儿块，
+    /// 而检索的 JOIN 会把它们静默丢掉——表在无声地变大，没人会发现。
+    #[test]
+    fn ai_tables_cascade_from_notes() {
+        let conn = open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO notes (id, uuid, title, body_json, body_text, created_at, updated_at)
+             VALUES (1, 'u', 't', '{}', 't', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (id, note_id, ord, heading, text) VALUES (1, 1, 0, '', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunk_embeddings (chunk_id, model, dim, vec)
+             VALUES (1, 'm', 1, X'00000000')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embed_queue (note_id, enqueued_at) VALUES (1, 1)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM notes WHERE id = 1", []).unwrap();
+
+        for table in ["chunks", "chunk_embeddings", "embed_queue"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} 没有随 notes 级联删除");
+        }
+    }
+
+    /// 删会话必须级联删掉它的消息。
+    #[test]
+    fn messages_cascade_from_conversations() {
+        let conn = open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (1, 'c', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at)
+             VALUES (1, 'user', 'q', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM conversations WHERE id = 1", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
