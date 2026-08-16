@@ -81,7 +81,23 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'MeshMind ${{ github.ref_name }}'
-          releaseBody: '安装包见下方附件。macOS 版本未做代码签名，首次打开需右键点图标选「打开」。'
+          releaseBody: |
+            安装包见下方附件。
+
+            **macOS 首次打开会提示「已损坏，无法打开」** —— 这不是包坏了。
+            应用未做 Apple 代码签名与公证，从浏览器下载后会被打上隔离属性，
+            近几版 macOS 对这种情况直接判定为损坏（右键点「打开」也不再管用）。
+
+            装好后执行一次即可：
+
+            ```
+            xattr -cr /Applications/MeshMind.app
+            ```
+
+            或者：系统设置 → 隐私与安全性 → 找到被阻止的 MeshMind → 「仍要打开」。
+
+            后续通过应用内自动更新装上的版本不受影响 —— 更新包由应用自己下载写入，
+            不经过浏览器，不会被打隔离属性。
           # 刻意建成草稿：两个平台的 job 往同一个 Release 里追加产物，
           # 自动发布会出现「Windows 包还没传上去，Release 已经公开」的窗口。
           # 两边都传完之后人工 `gh release edit <tag> --draft=false` 放出去。
