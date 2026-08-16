@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="56" y1="56" x2="968" y2="968"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14B8A6"/><stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="56" x2="0" y2="614"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#FFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="halo">
+      <stop offset="0" stop-color="#FFCE4A" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFCE4A" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="drop" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20"
+                    flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <circle cx="512" cy="512" r="456" fill="url(#bg)" filter="url(#drop)"/>
+  <circle cx="512" cy="512" r="456" fill="url(#gloss)"/><path d="M 293 712 L 293 348 L 512 603 L 731 348 L 731 712" fill="none" stroke="#FFFFFF" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/><circle cx="293.3" cy="348.0" r="65.6" fill="#FFFFFF"/><circle cx="730.7" cy="348.0" r="65.6" fill="#FFFFFF"/><circle cx="512.0" cy="603.1" r="72.9" fill="#FFFFFF"/><path d="M 835.5 70.0 Q 873.8 159.3 963.1 197.6 Q 873.8 235.9 835.5 325.2 Q 797.3 235.9 707.9 197.6 Q 797.3 159.3 835.5 70.0 Z" fill="#FFCE4A"/><path d="M 917.6 261.4 Q 936.7 306.0 981.4 325.2 Q 936.7 344.3 917.6 389.0 Q 898.4 344.3 853.8 325.2 Q 898.4 306.0 917.6 261.4 Z" fill="#FFCE4A"/></svg>
