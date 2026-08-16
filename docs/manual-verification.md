@@ -17,6 +17,10 @@
   **注意它测的是「前端向后端发了什么调用」，不是「后端做对了没有」**——
   后端被一份内存假实现顶掉了，所以真实的 SQLite 行为、全文索引、
   热键注册、Dock 图标切换一概不在覆盖范围内，仍然要靠下面的人工清单。
+- **CSP 违规守卫**（`e2e/csp.spec.ts`）：把 `tauri.conf.json` 里的**生产** CSP 真的挂到
+  文档响应头上，再走一遍主窗口 / 附件图片 / 搜索 / 设置 / 回收站 / 快捕窗口，
+  断言全程零违规。详见下面「内容安全策略（CSP）」一节——**它验到了什么、验不到什么，
+  那一节写得很细，收紧策略之前先读它。**
 - **安装包能否产出**：macOS 出 `.dmg`、Windows 出 `.msi`，产物上传到 run 的 artifacts（保留 7 天）
 
 也就是说「代码在 Windows 上能不能编、测试过不过、包打不打得出来」这类问题，
@@ -155,6 +159,85 @@ CI 里跑不了，也没法可靠地断言，只能人工确认。这份清单�
 - [ ] `[Windows]` `.msi` 安装后能正常启动
 - [ ] `[Windows]` 在**没有装 WebView2 Runtime** 的机器（干净的 Windows 10 虚拟机）上安装，
       有安装引导 / 自动拉起 WebView2 安装，而不是启动后白屏或直接崩
+
+## 内容安全策略（CSP）
+
+`crates/shell/tauri.conf.json` 的 `app.security` 现在是一份真策略（此前是 `csp: null`，
+即完全关闭）：
+
+```
+csp    : default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline';
+         script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:;
+         object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+devCsp : 同上，但 script-src 额外给 'unsafe-inline' 'unsafe-eval'，connect-src 额外给
+         ws://localhost:1420 http://localhost:1420（vite 的 HMR 要内联脚本、eval 和 websocket，
+         拿生产策略跑 `pnpm tauri dev` 会直接白屏）
+```
+
+非默认指令的理由：
+
+- **`img-src` 的 `blob:` 是命门**。附件图片全部走 `URL.createObjectURL` 产生的 blob URL 渲染
+  （见 `ui/lib/attachments.ts` 顶部关于「为什么不用 asset 协议」的说明），漏了它每一张图都碎，
+  而且**页面不报错、不白屏，只是图没了**。
+- **`style-src` 的 `'unsafe-inline'`**：TipTap / ProseMirror 会往节点上写内联样式，
+  vite dev 也靠 JS 注入 `<style>`。暂时留着。
+- **`connect-src` 的 `ipc:` / `http://ipc.localhost`**：Tauri 2 的 IPC 通道，
+  分别对应 macOS 与 Windows 两种形式。
+- `object-src 'none'` / `base-uri 'self'` / `frame-ancestors 'none'` 是纯收紧，没有代价。
+
+### 自动化已覆盖（人工不必重复）
+
+`e2e/csp.spec.ts` 用 `page.route()` 拦下文档响应、**把配置里的生产 `csp` 原样加成
+`Content-Security-Policy` 响应头**（从配置文件读，不在测试里抄第二份），同时从
+Chromium 控制台和页面的 `securitypolicyviolation` 事件两路收集违规，逐步断言零违规：
+
+- 应用启动、主窗口渲染、笔记列表出现
+- **打开一条带附件图片的笔记，图片真的显示出来**（断言 `img` 的 `naturalWidth > 0`，
+  被 CSP 拦下时它停在 0）——这是 `img-src blob:` 的直接验证
+- ⌘K 打开搜索面板并输入、打开设置面板、打开回收站
+- 快捕窗口渲染并输入
+
+外加两条守「守卫本身」的测试：策略被改回 `null` 时立刻红；运行时插一段内联脚本，
+必须真的被 `script-src` 拦下（证明响应头确实生效，而不是一路空跑出来的假绿）。
+
+### 这份守卫**验不到**什么 —— 人工只需确认这些
+
+不要因为 CI 绿了就跳过本节。守卫跑在 Playwright + vite dev server + Chromium 上，
+以下四类问题它结构上够不着：
+
+1. **Tauri 注入到真实 webview 的初始化脚本**。真机上 Tauri 会往页面里注入 IPC 桥与各插件的
+   引导脚本；vite dev server 上一行都没有（e2e 的假 IPC 走 CDP 注入，不受 CSP 管辖）。
+   这些注入脚本会不会被 `script-src 'self'` 挡下来，只有真机能回答。
+2. **`connect-src` 里的 `ipc:` 与 `http://ipc.localhost`**。假 IPC 是内存函数，不发真实请求，
+   这两项在自动化里既没被用到也没被验证。
+3. **生产策略与 dev 策略的差异**。守卫用的是生产 `csp`，而 `pnpm tauri dev` 跑的是更宽松的
+   `devCsp`；反过来 `devCsp` 自己写错（比如漏了 ws 端口导致 HMR 断掉）守卫也测不出来。
+4. **WKWebView / WebView2 与 Chromium 的解释差异**。三个引擎对 `blob:`、自定义协议、
+   `'self'` 是否覆盖 `ws:` 的处理并不完全一致，Chromium 上的结论只在 Chromium 上成立。
+
+另需知道：vite dev 会往首页注入一段**内联** module 脚本（react-refresh preamble），
+生产策略必然拦它。守卫的做法是只在**响应头**里补一个 `'nonce-…'`，并只贴给文档里
+没有 `src` 的 `<script>`——`tauri.conf.json` 里的策略一个字都没改，发出去的仍是严策略。
+另有一条测试钉住「仓库 `index.html` 里没有内联脚本」，防止应用自己加了内联脚本被这个
+nonce 顺手放行。
+
+于是人工只剩下面这几条（**每条之后都看一眼 devtools 控制台有没有
+`Refused to ... because it violates the following Content Security Policy directive`**）：
+
+- [ ] `pnpm tauri dev` 起来后应用**不白屏**（验的是 `devCsp` 本身可用，以及 HMR 的 ws 没被挡）
+- [ ] 用**安装包装出来的正式应用**（`.dmg` / `.msi`，走的才是生产 `csp`）启动后不白屏，
+      主窗口正常渲染 —— Tauri 注入脚本被挡的话，症状就是白屏
+- [ ] 正式应用里**粘贴一张截图，图片显示出来**；重开应用后打开这条笔记，图片仍然显示
+      （真机上的 blob URL 路径 + 真实 webview 对 `blob:` 的处理）
+- [ ] 正式应用里 IPC 真的通：新建笔记能保存、搜索有结果、设置面板能改热键
+      （任何一条不通都可能是 `connect-src` 少了 `ipc:` / `http://ipc.localhost`）
+- [ ] 在编辑器里**拖动图片节点**（ProseMirror 会写内联样式，验 `style-src 'unsafe-inline'`）
+- [ ] 唤起快捕窗口，粘图并保存
+- [ ] **macOS 与 Windows 各做一遍**：两个 webview 引擎对 CSP 的解释不同，
+      一个平台过了不代表另一个平台过
+
+发现 violation 时：**按提示加最小的那一项**，一次只改一条，不要图省事放 `*`；
+改完把理由补进上面「非默认指令的理由」，并回 `e2e/csp.spec.ts` 看这条能不能顺手被自动化接住。
 
 ## 数据安全
 
