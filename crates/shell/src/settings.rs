@@ -15,8 +15,39 @@ pub const KEY_HIDE_DOCK_ICON: &str = "macos.hide_dock_icon";
 /// 是否开机自启，`"true"` / `"false"`。
 pub const KEY_AUTOSTART: &str = "startup.autostart";
 
+/// AI 总开关，`"true"` / `"false"`。默认关——方案书的「零依赖启动」
+/// 意味着不配置 AI 时应用不该有任何网络行为。
+pub const KEY_AI_ENABLED: &str = "ai.enabled";
+/// `"openai"`（OpenAI 兼容协议）或 `"ollama"`。
+pub const KEY_AI_PROVIDER: &str = "ai.provider";
+pub const KEY_AI_BASE_URL: &str = "ai.base_url";
+/// **只写不读**：`get_settings` 会把这个键从返回值里剔除，换成
+/// `ai.api_key_set`。密钥因此不会经 IPC 进入 webview，也不会出现在
+/// 前端日志或错误上报里。
+pub const KEY_AI_API_KEY: &str = "ai.api_key";
+pub const KEY_AI_CHAT_MODEL: &str = "ai.chat_model";
+pub const KEY_AI_EMBED_MODEL: &str = "ai.embed_model";
+pub const KEY_AI_TOP_K: &str = "ai.top_k";
+
+/// `get_settings` 返回值里代替 `ai.api_key` 的那个键，值为 `"true"` / `"false"`。
+/// 它**不在** `ALLOWED_KEYS` 里——前端不能写它，它是读取时合成出来的。
+// 合成它的 get_settings 改造还没落地（命令层那一步），先压掉 dead_code。
+#[allow(dead_code)]
+pub const KEY_AI_API_KEY_SET: &str = "ai.api_key_set";
+
 /// 允许写入 settings 表的全部键名。
-pub const ALLOWED_KEYS: [&str; 3] = [KEY_CAPTURE_HOTKEY, KEY_HIDE_DOCK_ICON, KEY_AUTOSTART];
+pub const ALLOWED_KEYS: [&str; 10] = [
+    KEY_CAPTURE_HOTKEY,
+    KEY_HIDE_DOCK_ICON,
+    KEY_AUTOSTART,
+    KEY_AI_ENABLED,
+    KEY_AI_PROVIDER,
+    KEY_AI_BASE_URL,
+    KEY_AI_API_KEY,
+    KEY_AI_CHAT_MODEL,
+    KEY_AI_EMBED_MODEL,
+    KEY_AI_TOP_K,
+];
 
 /// 校验键名。
 ///
@@ -85,6 +116,25 @@ mod tests {
                 err.contains(KEY_CAPTURE_HOTKEY),
                 "错误里应列出合法取值，实际: {err}"
             );
+        }
+    }
+
+    /// 合成键不能进白名单——它是读取时算出来的，让前端写进去只会
+    /// 在 settings 表里留下一个永远对不上的幽灵值。
+    #[test]
+    fn the_synthesised_key_is_not_writable() {
+        assert!(ensure_allowed(KEY_AI_API_KEY_SET).is_err());
+    }
+
+    #[test]
+    fn ai_keys_are_writable() {
+        for key in [
+            KEY_AI_ENABLED,
+            KEY_AI_PROVIDER,
+            KEY_AI_BASE_URL,
+            KEY_AI_API_KEY,
+        ] {
+            assert!(ensure_allowed(key).is_ok(), "{key}");
         }
     }
 
