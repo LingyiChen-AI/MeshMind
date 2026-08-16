@@ -196,7 +196,9 @@ CREATE INDEX idx_messages_conversation ON messages (conversation_id, id);
 
 失败处理：`attempts += 1`，记 `last_error`，`next_try_at = now + min(2^attempts, 300) * 1000`。`attempts >= 5` 后不再自动重试（`next_try_at = i64::MAX`），但保留在队列里带着错误信息，供设置面板展示与手动「重试全部」。
 
-**首次启用 AI 时不静默开跑**：`ai_enable` 命令先返回待索引笔记数，前端确认后才真正置位 `ai.enabled` 并启动 worker。用户的 API 调用是要花钱的，不能偷偷烧。
+**首次启用 AI 时不静默开跑**：这件事拆成两个命令。确认框上的篇数来自 `ai_preview_index`——它是**只读**的，不写设置、不入队、不起线程；用户点了「继续」，前端才调 `ai_enable(true)` 真正置位 `ai.enabled`、全量入队并启动 worker。
+
+分成两个命令不是为了对称：把篇数放进 `ai_enable` 的回执，用户看见确认框的那一刻 worker 已经在发 embedding 请求了，点「取消」也追不回那之前漏出去的钱。用户的 API 调用是要花钱的，不能偷偷烧。
 
 ### 5.4 内存向量索引
 
@@ -344,7 +346,8 @@ struct ConnectionReport {
 | 命令 | 作用 |
 |---|---|
 | `ai_status` | `{ enabled, configured, pendingNotes, indexedChunks, memoryBytes, lastError }`。`configured` 的定义：`ai.base_url`、`ai.chat_model`、`ai.embed_model` 三项均非空，且 provider 为 `openai` 时 `ai.api_key` 也非空 |
-| `ai_enable(enabled)` | 开关 AI，返回 `{ pendingNotes }`。置真时启动 worker，置假时停止 worker 并释放内存索引 |
+| `ai_preview_index` | 只读：返回 `{ pendingNotes }` = 「现在启用的话要索引多少篇笔记」。不写设置、不入队、不起线程。启用前的确认框专用（§5.3） |
+| `ai_enable(enabled)` | 开关 AI，返回 `{ pendingNotes }`。置真时全量入队并启动 worker（**用户在确认框上点过「继续」之后才调**），置假时停止 worker 并释放内存索引 |
 | `ai_test_connection` | §7.2 |
 | `ai_reindex_all` | 清空 embeddings 并全量入队 |
 | `ai_retry_failed` | 把退避到底的队列项重置 `attempts` 与 `next_try_at` |

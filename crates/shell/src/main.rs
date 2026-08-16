@@ -126,11 +126,12 @@ fn main() {
             commands::set_capture_hotkey,
             commands::set_hide_dock_icon,
             commands::set_autostart,
-            // AI。这 13 个必须和 commands.rs 里的 `ai_*` 命令一一对上：
+            // AI。这 14 个必须和 commands.rs 里的 `ai_*` 命令一一对上：
             // MVP 阶段有四个命令写完了却没写进这张表，前端调过去只得到
             // 「Command xxx not found」，直到 Playwright 跑起来才发现。
             // `e2e/contract.spec.ts` 现在会守住这条。
             commands::ai_status,
+            commands::ai_preview_index,
             commands::ai_enable,
             commands::ai_test_connection,
             commands::ai_reindex_all,
