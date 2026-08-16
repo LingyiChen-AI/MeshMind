@@ -44,6 +44,9 @@ export interface AiPanelProps {
   statusToken: number
 }
 
+/** 离底部多近算「用户还在看最新内容」。留一行多的余量，免得差几像素就判成在翻旧内容。 */
+const STICK_TO_BOTTOM_PX = 120
+
 /** 一次提问从发出到落定之间，界面上多出来的那对气泡。 */
 interface Pending {
   question: string
@@ -69,6 +72,10 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
   // 每次提问的序号。channel 的回调是按 ask 绑定的，认这个号才分得清「这条事件属于
   // 哪一次提问」——见文件头第 3 条。
   const askSeqRef = useRef(0)
+
+  // 当前会话同时存一份 ref：settle 在 await 之后才用到它，那时闭包里的值可能已经过期。
+  const conversationIdRef = useRef(conversationId)
+  conversationIdRef.current = conversationId
 
   const streamRef = useRef<HTMLDivElement | null>(null)
 
@@ -153,10 +160,15 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
     }
   }, [conversationId])
 
-  // 新消息进来就滚到底。放在 effect 里而不是事件回调里，是因为要等 DOM 真的长高。
+  // 新内容进来就滚到底。放在 effect 里而不是事件回调里，是因为要等 DOM 真的长高。
+  //
+  // **只在用户本来就贴着底部时才滚**：流式回答每来一个 Delta 就触发一次，
+  // 无条件滚的话，用户往上翻去看引用的那篇笔记，会被一路拽回底部。
   useEffect(() => {
     const node = streamRef.current
-    if (node !== null) node.scrollTop = node.scrollHeight
+    if (node === null) return
+    const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight
+    if (distanceToBottom < STICK_TO_BOTTOM_PX) node.scrollTop = node.scrollHeight
   }, [messages, ask.answer, pending])
 
   /**
@@ -173,7 +185,9 @@ export function AiPanel({ onClose, onOpenNote, onOpenSettings, statusToken }: Ai
         ipc.aiListConversations(),
       ])
       if (!aliveRef.current) return
-      setMessages(rows)
+      // 这两个请求在飞的期间用户可能已经切走了会话。那时这批消息属于**上一个**会话，
+      // 写进去会把眼前这个会话的记录整个换掉——和 App 里 stillCurrent 挡的是同一件事。
+      if (conversationIdRef.current === conversation) setMessages(rows)
       setConversations(list)
     } catch (err) {
       if (aliveRef.current) setError(String(err))
