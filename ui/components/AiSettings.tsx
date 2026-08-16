@@ -10,7 +10,8 @@
 //
 // 这一节存在的最大理由是「不能偷偷烧钱」：启用 AI 会真的开始一篇一篇地调用
 // 用户配置的模型服务。所以关→开这条路上必须有一次带具体篇数的确认，
-// 而且用户反悔时要能立刻停下来（见 toggleEnabled / cancelEnable）。
+// 而且确认**要在任何请求发出去之前**：先 `aiPreviewIndex`（只读）拿篇数，
+// 用户点「继续」才 `aiEnable(true)`（见 toggleEnabled / confirmEnable）。
 //
 // 自己发 IPC、自己显示错误（和 SearchPanel / TrashPanel / UpdateSettingsSection 一致）。
 
@@ -77,7 +78,8 @@ export function AiSettings() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
-  // 等用户确认的「要为 N 篇笔记建索引」。非 null 时 AI **已经是开着的**（见 toggleEnabled）。
+  // 等用户确认的「要为 N 篇笔记建索引」。非 null 时 AI **还是关着的**，
+  // 一个模型请求都没发出去——这正是这个状态存在的意义（见 toggleEnabled）。
   const [enableConfirm, setEnableConfirm] = useState<number | null>(null)
   // 重建索引的二段式确认：第一次点只是武装，第二次才真的重建（和回收站的清空一个套路）。
   const [reindexArmed, setReindexArmed] = useState(false)
@@ -155,25 +157,32 @@ export function AiSettings() {
   /**
    * 开 / 关 AI。
    *
-   * 开启这条路上的顺序是被后端定死的：`ai_enable(true)` 自己就是「真的开」——
-   * 它写库、全量入队、起 worker，然后才把待索引篇数还给我们。也就是说，
-   * **确认框只能在它返回之后弹**，那一刻索引已经开始跑了。
-   * 所以取消这条路必须真的能停下来：`cancelEnable` 立刻调 `ai_enable(false)`，
-   * 它会停 worker、取消在飞的请求、释放内存索引。
+   * **开这条路只是问一句，不动任何东西。** `aiPreviewIndex` 是只读的：
+   * 它只回答「现在启用的话要为多少篇笔记建索引」，不写设置、不入队、不起线程。
+   * 真正的启用在用户点「继续」之后（confirmEnable）才发生。
+   *
+   * 顺序反过来——先 `aiEnable(true)` 再拿它的回执弹确认框——用户看见问句时
+   * embedding 请求已经在路上了，点「取消」也追不回那之前漏出去的那几篇的钱。
+   *
+   * 关这条路相反，要立刻生效：它会停 worker、取消在飞的提问、释放内存索引。
    */
   const toggleEnabled = useCallback(async (next: boolean) => {
     setBusy('enable')
     setError(null)
     setNotice(null)
     try {
-      const enabled = await ipc.aiEnable(next)
+      if (next) {
+        const preview = await ipc.aiPreviewIndex()
+        if (aliveRef.current) setEnableConfirm(preview.pendingNotes)
+        return
+      }
+      const report = await ipc.aiEnable(false)
       if (!aliveRef.current) return
       // 命令已经落地，界面反映的就是真实状态，这不是乐观更新。
       setStatus((prev) =>
-        prev === null ? prev : { ...prev, enabled: next, pendingNotes: enabled.pendingNotes },
+        prev === null ? prev : { ...prev, enabled: false, pendingNotes: report.pendingNotes },
       )
-      if (next) setEnableConfirm(enabled.pendingNotes)
-      else setEnableConfirm(null)
+      setEnableConfirm(null)
     } catch (err) {
       if (aliveRef.current) setError(String(err))
     } finally {
@@ -181,17 +190,31 @@ export function AiSettings() {
     }
   }, [])
 
-  const cancelEnable = useCallback(async () => {
+  /** 取消：什么都不用做。AI 从头到尾没被打开过，没有需要回滚的东西。 */
+  const cancelEnable = useCallback(() => {
     setEnableConfirm(null)
-    await toggleEnabled(false)
-    if (aliveRef.current) setNotice('已取消，AI 保持关闭，刚开始的索引也已经停下。')
-  }, [toggleEnabled])
+    setNotice('已取消，AI 保持关闭。')
+  }, [])
 
+  /** 确认之后才真的开：写库、全量入队、起 worker——从这一刻起开始花钱。 */
   const confirmEnable = useCallback(async () => {
-    setEnableConfirm(null)
-    setNotice('已开始建立索引，可以关掉这个面板，索引在后台继续。')
-    await refreshStatus()
-  }, [refreshStatus])
+    setBusy('enable')
+    setError(null)
+    setNotice(null)
+    try {
+      const enabled = await ipc.aiEnable(true)
+      if (!aliveRef.current) return
+      setEnableConfirm(null)
+      setStatus((prev) =>
+        prev === null ? prev : { ...prev, enabled: true, pendingNotes: enabled.pendingNotes },
+      )
+      setNotice('已开始建立索引，可以关掉这个面板，索引在后台继续。')
+    } catch (err) {
+      if (aliveRef.current) setError(String(err))
+    } finally {
+      if (aliveRef.current) setBusy(null)
+    }
+  }, [])
 
   /** 文本框失焦即保存。值没变就一个 IPC 都不发。 */
   const commitText = useCallback(
@@ -384,7 +407,9 @@ export function AiSettings() {
           <input
             type="checkbox"
             checked={status.enabled}
-            disabled={disabled || cannotEnable}
+            // 确认框还开着时不许再点：再点一次只会又发一遍预览，
+            // 而 AI 到底开没开完全取决于那个框上的按钮。
+            disabled={disabled || cannotEnable || enableConfirm !== null}
             onChange={(event) => void toggleEnabled(event.target.checked)}
           />
           <span className="settings-label">启用 AI 与知识问答</span>
@@ -406,12 +431,12 @@ export function AiSettings() {
             <p>
               将为 {enableConfirm} 篇笔记建立索引，会调用你配置的模型服务并产生费用，继续？
             </p>
-            <p>索引已经开始了。点「取消」会立刻停下并把 AI 关回去。</p>
+            <p>点「继续」之后才会开始，现在还没有发出任何请求。</p>
             <div className="trash-item-actions">
               <button type="button" className="primary" disabled={disabled} onClick={() => void confirmEnable()}>
                 继续
               </button>
-              <button type="button" disabled={disabled} onClick={() => void cancelEnable()}>
+              <button type="button" disabled={disabled} onClick={cancelEnable}>
                 取消
               </button>
             </div>

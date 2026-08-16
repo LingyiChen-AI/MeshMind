@@ -98,7 +98,7 @@ export interface AiStatus {
   lastError: string | null
 }
 
-/** 对应 Rust `EnableReport`，`ai_enable` 的回执 */
+/** 对应 Rust `EnableReport`，`ai_preview_index` 与 `ai_enable` 的共用回执 */
 export interface EnableReport {
   pendingNotes: number
 }
@@ -424,10 +424,21 @@ export const ipc = {
   },
 
   /**
+   * 「现在启用的话要为多少篇笔记建索引」。**只读，没有任何副作用**：
+   * 不改设置、不入队、不起后台线程、不发一个模型请求。
+   *
+   * 关→开这条路上必须先调它、拿着篇数让用户确认，确认之后才 {@link aiEnable}。
+   * 顺序反过来的话，用户看见确认框时 embedding 请求已经在路上了。
+   */
+  aiPreviewIndex(): Promise<EnableReport> {
+    return call<EnableReport>('ai_preview_index')
+  },
+
+  /**
    * 开 / 关 AI，返回还有多少篇笔记等着建索引。
    *
-   * 开启会真的开始调用模型服务、产生费用，所以调用方必须先拿 `pendingNotes`
-   * 让用户确认，用户反悔就立刻 `aiEnable(false)` 回滚。
+   * 置真**就是真的开**：写库、把全部笔记入队、起 worker，从这一刻起开始花钱。
+   * 所以它只该在用户看过 {@link aiPreviewIndex} 的篇数并点了「继续」之后才被调用。
    */
   aiEnable(enabled: boolean): Promise<EnableReport> {
     return call<EnableReport>('ai_enable', { enabled })

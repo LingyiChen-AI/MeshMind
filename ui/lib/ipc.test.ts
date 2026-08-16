@@ -128,6 +128,15 @@ describe('AI 命令', () => {
     expect(status.dimMismatches).toBe(0)
   })
 
+  // 预览是「花钱之前先问一句」用的，它必须是自己一个命令：
+  // 如果哪天有人把它实现成 `ai_enable`，这条会红。
+  it('aiPreviewIndex 调的是只读的 ai_preview_index，且不带参数', async () => {
+    const spy = mockInvoke({ pending_notes: 12 })
+    const report = await ipc.aiPreviewIndex()
+    expect(spy).toHaveBeenCalledWith('ai_preview_index', undefined)
+    expect(report.pendingNotes).toBe(12)
+  })
+
   it('aiEnable 的回执转成 camelCase', async () => {
     const spy = mockInvoke({ pending_notes: 12 })
     const report = await ipc.aiEnable(true)

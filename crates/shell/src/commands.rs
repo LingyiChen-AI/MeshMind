@@ -462,7 +462,10 @@ pub struct AiStatus {
     pub last_error: Option<String>,
 }
 
-/// `ai_enable` 的回执。开关之后前端要立刻知道「还有多少篇等着建索引」。
+/// `ai_preview_index` 与 `ai_enable` 的共用回执：还有多少篇笔记等着建索引。
+///
+/// 两个命令回同一个形状是有意的——前端在确认框里显示的数字，和确认之后
+/// 真正开跑的那批笔记，说的必须是同一件事。
 #[derive(Serialize)]
 pub struct EnableReport {
     pub pending_notes: i64,
@@ -538,7 +541,23 @@ pub fn ai_status(state: State<'_, AppState>) -> CmdResult<AiStatus> {
     })
 }
 
-/// 开 / 关 AI。
+/// 「如果现在启用 AI，会有多少篇笔记要建索引」。**只读，没有任何副作用**：
+/// 不写设置、不入队、不起线程、不发一个网络请求。
+///
+/// 它存在的唯一理由是确认框的先后顺序。`ai_enable(true)` 本身就是「真的开」，
+/// 拿它的回执去弹确认框，等于用户看见问句时钱已经在烧了——点「取消」也追不回
+/// 那之前漏出去的 embedding 请求。所以确认框的数字从这里取，
+/// `ai_enable` 退回它本来的位置：确认之后才执行。
+#[tauri::command]
+pub fn ai_preview_index(state: State<'_, AppState>) -> CmdResult<EnableReport> {
+    let conn = conn!(state);
+    Ok(EnableReport {
+        pending_notes: index::indexable_note_count(&conn)?,
+    })
+}
+
+/// 开 / 关 AI。**调用方应当先用 `ai_preview_index` 让用户确认过**——
+/// 走到这里就已经是在花钱了。
 ///
 /// 置真时的顺序是死的：**先把 `ai.enabled` 写进库，再 spawn worker**。
 /// 反过来的话 worker 第一轮醒来读到的还是 `false`，什么都不做就回去睡，

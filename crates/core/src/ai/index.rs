@@ -207,6 +207,21 @@ pub fn pending_count(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
+/// 「如果现在启用 AI，会有多少篇笔记要建索引」。**只读**。
+///
+/// WHERE 子句必须和 `enqueue_all` 的那条逐字一致：这个数字是拿去给用户
+/// 做「要不要花这笔钱」的决定的，和实际会被入队的篇数对不上就等于误导。
+/// 它不能用 `pending_count` 代替——启用之前队列里通常空空如也，
+/// 而那时正是用户最需要知道篇数的时刻。
+pub fn indexable_note_count(conn: &Connection) -> Result<i64> {
+    let count = conn.query_row(
+        "SELECT count(*) FROM notes WHERE deleted_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count)
+}
+
 /// 队列里最近一条错误，供设置面板展示。
 pub fn last_error(conn: &Connection) -> Result<Option<String>> {
     let value = conn.query_row(
@@ -548,6 +563,32 @@ mod tests {
         let n = enqueue_all(&conn, 3_000).unwrap();
         assert_eq!(n, 1);
         assert_eq!(take_due(&conn, 4_000, 10).unwrap(), vec![alive]);
+    }
+
+    /// 预览给出的篇数就是启用之后真会入队的篇数，回收站里的不算。
+    /// 两个数字对不上，确认框上的「将为 N 篇笔记建立索引」就是在骗人。
+    #[test]
+    fn indexable_note_count_agrees_with_enqueue_all() {
+        let mut conn = conn();
+        note(&mut conn, "活着");
+        let dead = note(&mut conn, "删了");
+        notes::soft_delete(&mut conn, dead, 2_000).unwrap();
+        conn.execute("DELETE FROM embed_queue", []).unwrap();
+
+        assert_eq!(indexable_note_count(&conn).unwrap(), 1);
+        assert_eq!(enqueue_all(&conn, 3_000).unwrap() as i64, 1);
+    }
+
+    /// 预览是给「还没决定要不要花这笔钱」的用户看的：它自己一行都不许写。
+    /// 拿 `enqueue_all` 的返回值来充数就会踩到这条。
+    #[test]
+    fn indexable_note_count_writes_nothing() {
+        let mut conn = conn();
+        note(&mut conn, "活着");
+        conn.execute("DELETE FROM embed_queue", []).unwrap();
+
+        assert_eq!(indexable_note_count(&conn).unwrap(), 1);
+        assert_eq!(pending_count(&conn).unwrap(), 0, "预览不该把笔记入队");
     }
 
     #[test]
