@@ -15,7 +15,7 @@
 // 错误：所有命令失败时 reject 一个字符串（中文错误消息，如「笔记不存在: 7」），
 // 调用方 catch 到的就是 string，不是 Error 对象。
 
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 
 // ---------- 类型（对应 crates/core 的 Rust 结构体） ----------
 
@@ -74,6 +74,107 @@ export interface TagCount {
   name: string
   /** 全库带这个标签的未删除笔记条数 */
   count: number
+}
+
+// ---------- AI（对应 crates/shell 的 commands.rs 与 ai/ask.rs） ----------
+
+/** 对应 Rust `AiStatus` */
+export interface AiStatus {
+  enabled: boolean
+  configured: boolean
+  /** 配置不完整时缺的那一项的中文名，完整时为 null */
+  missingField: string | null
+  pendingNotes: number
+  indexedChunks: number
+  memoryBytes: number
+  /** 装载索引时跳过的维度不符行数，非 0 说明换过 embedding 模型但没重建 */
+  dimMismatches: number
+  lastError: string | null
+}
+
+/** 对应 Rust `EnableReport`，`ai_enable` 的回执 */
+export interface EnableReport {
+  pendingNotes: number
+}
+
+/**
+ * 对应 Rust `ConnectionReport`。
+ * 两条链路分开报：embedding 通了而对话没通（模型名写错）是常见的半通状态。
+ */
+export interface ConnectionReport {
+  embedOk: boolean
+  /** embedding 的维度，失败时为 null */
+  embedDim: number | null
+  chatOk: boolean
+  /** 已脱敏，可以直接显示给用户 */
+  error: string | null
+}
+
+/** 对应 Rust `Citation`。index 与回答正文里的 `[n]` 标注一一对应，从 1 起。 */
+export interface Citation {
+  index: number
+  noteId: number
+  uuid: string
+  title: string
+  heading: string
+  excerpt: string
+}
+
+/**
+ * 对应 Rust `ChatMessage`。
+ * Rust 那边 `role` 的类型是 String，这里收窄成两个字面量——写入方只有编排层，
+ * 只会写 `user` / `assistant`。收窄是为了让渲染分支能被穷尽检查。
+ */
+export interface ChatMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  citations: Citation[]
+  createdAt: number
+}
+
+/** 对应 Rust `Conversation` */
+export interface Conversation {
+  id: number
+  title: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 对应 Rust `SemanticHit`，已按笔记去重、按 score 降序 */
+export interface SemanticHit {
+  noteId: number
+  uuid: string
+  title: string
+  excerpt: string
+  score: number
+}
+
+/**
+ * 对应 Rust `AskEvent`。serde 的默认外部标签把有字段的变体序列化成单键对象
+ * `{"Delta":{"text":"…"}}`，**无字段的 `Cancelled` 则是裸字符串** `"Cancelled"`。
+ *
+ * 两处容易栽跟头，都会表现为「界面安静地什么都不显示」而不是报错：
+ *
+ * 1. **这条路径不经过 `toCamel`**：Channel 的载荷由 Tauri 直接投递，
+ *    所以字段名必须写成 Rust 那边的 snake_case（`message_id`）。
+ * 2. 判别时**必须先处理 `typeof event === 'string'` 这一支**，
+ *    否则取消事件会被当成对象去取键，静默地什么也匹配不上。
+ */
+export type AskEvent =
+  | { Retrieved: { citations: Citation[] } }
+  | { Delta: { text: string } }
+  | { Done: { message_id: number } }
+  | { Failed: { message: string } }
+  | 'Cancelled'
+
+/** 索引进度事件名。载荷 `{ pending, indexed }`，是普通 Tauri 事件而非 Channel。 */
+export const AI_INDEX_PROGRESS_EVENT = 'ai://index-progress'
+
+/** `ai://index-progress` 的载荷。两个键本来就没有下划线，不需要 `toCamel`。 */
+export interface IndexProgress {
+  pending: number
+  indexed: number
 }
 
 // ---------- snake_case → camelCase ----------
@@ -268,5 +369,93 @@ export const ipc = {
   /** 开 / 关开机自启（真的写系统的自启项），并落库。 */
   setAutostart(enabled: boolean): Promise<void> {
     return call<void>('set_autostart', { enabled })
+  },
+
+  // ---------- AI ----------
+
+  /** AI 的开关、配置完整性与索引进度。设置面板每次打开与收到进度事件时都拉一次。 */
+  aiStatus(): Promise<AiStatus> {
+    return call<AiStatus>('ai_status')
+  },
+
+  /**
+   * 开 / 关 AI，返回还有多少篇笔记等着建索引。
+   *
+   * 开启会真的开始调用模型服务、产生费用，所以调用方必须先拿 `pendingNotes`
+   * 让用户确认，用户反悔就立刻 `aiEnable(false)` 回滚。
+   */
+  aiEnable(enabled: boolean): Promise<EnableReport> {
+    return call<EnableReport>('ai_enable', { enabled })
+  },
+
+  /** 连通性自检。会真的各发一次 embedding 与对话请求。 */
+  aiTestConnection(): Promise<ConnectionReport> {
+    return call<ConnectionReport>('ai_test_connection')
+  },
+
+  /** 清空并重建全部向量索引，返回入队的笔记条数。换 embedding 模型后必须做。 */
+  aiReindexAll(): Promise<number> {
+    return call<number>('ai_reindex_all')
+  },
+
+  /** 重试之前向量化失败的笔记，返回重新入队的条数。 */
+  aiRetryFailed(): Promise<number> {
+    return call<number>('ai_retry_failed')
+  },
+
+  /**
+   * 发起提问。**命令立刻返回**（Rust 侧另起线程干活），答案全部走 channel 流式推来，
+   * 所以这个 Promise 落定不代表回答结束——别在 await 之后收起「正在思考」。
+   *
+   * 同一时刻只允许一个提问在飞，新的提问会自动取消上一个。
+   * 调用方仍要负责在组件卸载或切换会话时调 `aiCancel`。
+   *
+   * 刻意不走 `call`：`Channel` 必须原样交给 `invoke`（它靠自身的 `toJSON`
+   * 序列化成 `__CHANNEL__:<id>`），而返回值是 null，没有可转换的东西。
+   */
+  aiAsk(
+    conversationId: number,
+    question: string,
+    onEvent: (event: AskEvent) => void,
+  ): Promise<void> {
+    // 回调经构造函数传入而不是事后赋值，少一个「忘了赋值就静默不响应」的窗口。
+    const channel = new Channel<AskEvent>(onEvent)
+    return invoke<void>('ai_ask', { conversationId, question, onEvent: channel })
+  },
+
+  /** 取消在飞的提问。没有在飞的提问时什么也不做，不是错误。 */
+  aiCancel(): Promise<void> {
+    return call<void>('ai_cancel')
+  },
+
+  /**
+   * 语义检索。**AI 未启用 / 未配置全 / 查询为空 / limit 为 0 时返回 `[]` 而不是报错**，
+   * 调用方不必自己判断能不能用，也不该为此弹错误横幅。
+   */
+  aiSemanticSearch(query: string, limit = 10): Promise<SemanticHit[]> {
+    return call<SemanticHit[]>('ai_semantic_search', { query, limit })
+  },
+
+  /** 会话列表，按 updated_at 降序。 */
+  aiListConversations(limit = 50, offset = 0): Promise<Conversation[]> {
+    return call<Conversation[]>('ai_list_conversations', { limit, offset })
+  },
+
+  /** 新建空会话，返回它的 id。标题会在第一次提问后由后端改写。 */
+  aiCreateConversation(): Promise<number> {
+    return call<number>('ai_create_conversation')
+  },
+
+  /** 一个会话的全部消息，按时间升序。`citations` 为空时是 `[]` 而不是 null。 */
+  aiGetMessages(conversationId: number): Promise<ChatMessage[]> {
+    return call<ChatMessage[]>('ai_get_messages', { conversationId })
+  },
+
+  aiDeleteConversation(id: number): Promise<void> {
+    return call<void>('ai_delete_conversation', { id })
+  },
+
+  aiRenameConversation(id: number, title: string): Promise<void> {
+    return call<void>('ai_rename_conversation', { id, title })
   },
 }
