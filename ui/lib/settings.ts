@@ -16,7 +16,44 @@ export const SETTING_KEYS = {
   hideDockIcon: 'macos.hide_dock_icon',
   /** 是否开机自启，`"true"` / `"false"` */
   autostart: 'startup.autostart',
+  /** AI 总开关，`"true"` / `"false"`。**只能由 `ipc.aiEnable` 写**，见下面的类型 */
+  aiEnabled: 'ai.enabled',
+  /** `"openai"`（OpenAI 兼容协议）或 `"ollama"` */
+  aiProvider: 'ai.provider',
+  aiBaseUrl: 'ai.base_url',
+  /** **只写不读**：`get_settings` 会把它剔除，换成合成的 `ai.api_key_set` */
+  aiApiKey: 'ai.api_key',
+  aiChatModel: 'ai.chat_model',
+  aiEmbedModel: 'ai.embed_model',
+  /** 每次提问喂给模型的片段数，十进制字符串。空 / 非法值由 Rust 侧回落成默认值 */
+  aiTopK: 'ai.top_k',
 } as const
+
+/**
+ * `get_settings` 返回值里代替 `ai.api_key` 的那个合成键，值是 `"true"` / `"false"`。
+ *
+ * 刻意**不放进 `SETTING_KEYS`**：那张表的含义是「允许写入的键」，
+ * 而这个键在 Rust 的 ALLOWED_KEYS 里根本不存在，写它会被外壳直接拒掉。
+ */
+export const AI_API_KEY_SET = 'ai.api_key_set'
+
+/**
+ * 允许经 `ipc.setSetting` 直接写的键。
+ *
+ * 名字里的「record only」是这个类型存在的全部理由：这几个键**只是记录**，
+ * 写进库就算生效（Rust 侧下一次用到配置时才读）。白名单里另外四个键都不是——
+ * 热键要注册到系统、Dock 图标要真的切换、自启要写 LaunchAgent/注册表、
+ * `ai.enabled` 要起停后台线程，它们各有专用命令，具体见 `ipc.setSetting` 的注释。
+ * 把这份区分写成类型，是为了让「误用专用键」在编译期就红，而不是在运行时
+ * 表现成「开关看着开了但什么也没发生」。
+ */
+export type RecordOnlySettingKey =
+  | typeof SETTING_KEYS.aiProvider
+  | typeof SETTING_KEYS.aiBaseUrl
+  | typeof SETTING_KEYS.aiApiKey
+  | typeof SETTING_KEYS.aiChatModel
+  | typeof SETTING_KEYS.aiEmbedModel
+  | typeof SETTING_KEYS.aiTopK
 
 /** `get_settings` 的原始返回：键有序，值一律字符串。 */
 export type SettingsMap = Record<string, string>
@@ -88,6 +125,42 @@ export function parseSettings(settings: SettingsMap, mac: boolean): AppSettings 
     captureHotkeyIsDefault: hotkey.isDefault,
     hideDockIcon: readBool(settings, SETTING_KEYS.hideDockIcon),
     autostart: readBool(settings, SETTING_KEYS.autostart),
+  }
+}
+
+/** 服务商。和 Rust 的 `Provider` 两个变体一一对应。 */
+export type AiProvider = 'openai' | 'ollama'
+
+/**
+ * 读服务商。
+ *
+ * 宽松度必须和 Rust 的 `Provider::parse` 一模一样：**只有恰好 `"ollama"` 是 Ollama，
+ * 其余一切（空串、拼错、大写）都按 OpenAI 兼容协议处理**。这边多认一种写法，
+ * 设置页会显示 Ollama 而外壳按 OpenAI 发请求——路径和鉴权都不一样，
+ * 用户看到的是一句和界面完全对不上的 404。
+ */
+export function parseProvider(value: string): AiProvider {
+  return value === 'ollama' ? 'ollama' : 'openai'
+}
+
+/** AI 设置表单的初值。`enabled` 不在这里：它的真相是 `ai_status`，不是设置表。 */
+export interface AiFormSettings {
+  provider: AiProvider
+  baseUrl: string
+  chatModel: string
+  embedModel: string
+  /** 库里存着一个非空密钥。密钥本身**永远不会**回到前端，只有这个布尔 */
+  apiKeySet: boolean
+}
+
+/** 把 `get_settings` 的原始 map 解释成 AI 设置表单的初值。 */
+export function parseAiSettings(settings: SettingsMap): AiFormSettings {
+  return {
+    provider: parseProvider(readRaw(settings, SETTING_KEYS.aiProvider)),
+    baseUrl: readRaw(settings, SETTING_KEYS.aiBaseUrl),
+    chatModel: readRaw(settings, SETTING_KEYS.aiChatModel),
+    embedModel: readRaw(settings, SETTING_KEYS.aiEmbedModel),
+    apiKeySet: readBool(settings, AI_API_KEY_SET),
   }
 }
 

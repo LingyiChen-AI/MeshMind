@@ -17,6 +17,7 @@ import { acceleratorFromEvent, formatAccelerator } from '../lib/accelerator'
 import { ipc } from '../lib/ipc'
 import { isMac } from '../lib/platform'
 import { type AppSettings, parseSettings } from '../lib/settings'
+import { AiSettings } from './AiSettings'
 import { UpdateSettingsSection } from './UpdateNotice'
 
 /** 哪一项正在提交。同一时刻只允许一项在途，其余控件一起禁用。 */
@@ -277,6 +278,11 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 用户主动点了一下却什么都没变，他分不清是已经最新还是按钮坏了。
                 这一节自带状态与 IPC，不读设置表，只是借这个面板当入口。 */}
             <UpdateSettingsSection />
+
+            {/* AI 一节同样自带状态与 IPC。它和上面三项的取舍正好相反：
+                那三项会真的动系统（所以不做乐观更新），AI 的配置项是纯记录型，
+                写库即生效——细节见 AiSettings 顶部。 */}
+            <AiSettings />
           </div>
         ) : null}
 

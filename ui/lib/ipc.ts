@@ -17,6 +17,12 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 
+// 唯一一个从别处引进来的类型。键名的真相在 lib/settings.ts（那份和 Rust 的
+// ALLOWED_KEYS 逐字对齐、有测试钉住），这里只借它约束 `setSetting` 能写哪些键，
+// 免得把同一串键名再抄一遍——抄两份就一定会有一天只改了一份。
+// 只是 type import，运行时没有任何依赖。
+import type { RecordOnlySettingKey } from './settings'
+
 // ---------- 类型（对应 crates/core 的 Rust 结构体） ----------
 
 /** 对应 Rust `Note` */
@@ -365,11 +371,32 @@ export const ipc = {
     return invoke<Record<string, string>>('get_settings')
   },
 
-  // 外壳还有一个通用的 `set_setting`，这里**刻意不封装**：三个设置项全都不能只写库。
-  // 热键要真的注册上去、Dock 图标要真的切换、自启要真的写进 LaunchAgent/注册表，
-  // 各自都有下面的专用命令（它们都是先动系统、成功了才落库，失败会回滚）。
-  // 只走 set_setting 的结果是库里是新值、系统上还是旧行为，而且没有任何报错。
-  // 将来真有「纯记录型」的设置项时再加回来。
+  /**
+   * 写一个**纯记录型**设置项：值只进库，没有任何系统副作用。
+   *
+   * 参数类型收窄成 `RecordOnlySettingKey`（见 lib/settings.ts）不是装饰——
+   * 白名单里另外四个键**必须走专用命令**，走这里会留下「库里是新值、系统上还是
+   * 旧行为」的中间态，而且没有任何报错：
+   *
+   * - `hotkey.capture` → {@link setCaptureHotkey}：热键要真的注册到系统上；
+   * - `macos.hide_dock_icon` → {@link setHideDockIcon}：Dock 图标要真的切换；
+   * - `startup.autostart` → {@link setAutostart}：要真的写 LaunchAgent / 注册表；
+   * - `ai.enabled` → {@link aiEnable}：开启要把全部笔记入队并起后台线程，关闭要取消
+   *   在飞的提问、停线程、释放内存索引。只写这个键的话开关看着是开的，
+   *   却一篇笔记都不会被索引。
+   *
+   * 上面三个（热键 / Dock / 自启）的专用命令都是先动系统、成功了才落库，失败会回滚。
+   *
+   * 剩下的 AI 配置项（provider / base_url / api_key / chat_model / embed_model /
+   * top_k）则是真正的纯记录型：读取方是 Rust 侧下一次用到配置的时候（下一次向量化、
+   * 下一次提问），写库就是生效，没有中间态，所以它们走这里。
+   *
+   * 还有一个 `ai.api_key_set` 是 `getSettings` **合成**出来的只读键，不在白名单里，
+   * 写它会被外壳直接拒掉——它的类型里也没有它。
+   */
+  setSetting(key: RecordOnlySettingKey, value: string): Promise<void> {
+    return call<void>('set_setting', { key, value })
+  },
 
   /**
    * 换快捕热键并落库。`accelerator` 语法见 lib/accelerator.ts。
